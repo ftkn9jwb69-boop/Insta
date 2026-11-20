@@ -37,25 +37,42 @@ def ease_out(x):
 _cache = {}
 
 
+MASKS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "masks")
+
+
+def _compose(im, mode, mask=None):
+    """Returns the base canvas (and mask canvas) for a scene mode."""
+    if mode == "cover":
+        return im, mask
+    if mode == "fit":
+        cw, ch, yc = 1500, 2667, 0.42
+    else:  # fitw: 9:16 canvas exactly as wide as the photo, photo slightly low so the sky gets room
+        cw, ch, yc = im.width, int(im.width * 16 / 9), 0.56
+    s = max(cw / im.width, ch / im.height)
+    bg = im.resize((int(im.width * s), int(im.height * s)), Image.BICUBIC)
+    bg = bg.crop(((bg.width - cw) // 2, (bg.height - ch) // 2, (bg.width - cw) // 2 + cw, (bg.height - ch) // 2 + ch))
+    bg = bg.filter(ImageFilter.GaussianBlur(45))
+    bg = Image.eval(bg, lambda v: int(v * 0.5))
+    fh = int(im.height * cw / im.width)
+    top = int(ch * yc - fh / 2)
+    bg.paste(im.resize((cw, fh), Image.BICUBIC), (0, top))
+    mk = None
+    if mask is not None:
+        mk = Image.new("L", (cw, ch), 0)
+        mk.paste(255, (0, 0, cw, max(top, 0) + 2))
+        mk.paste(mask.resize((cw, fh), Image.BILINEAR), (0, top))
+    return bg, mk
+
+
 def load_base(n, mode):
     key = (n, mode)
     if key in _cache:
         return _cache[key]
     im = ImageOps.exif_transpose(Image.open(f"{UP}/{PH[n]}-image.jpg")).convert("RGB")
-    if mode == "fit":
-        cw, ch = 1500, 2667
-        s = max(cw / im.width, ch / im.height)
-        bg = im.resize((int(im.width * s), int(im.height * s)), Image.BICUBIC)
-        bg = bg.crop(((bg.width - cw) // 2, (bg.height - ch) // 2, (bg.width - cw) // 2 + cw, (bg.height - ch) // 2 + ch))
-        bg = bg.filter(ImageFilter.GaussianBlur(45))
-        bg = Image.eval(bg, lambda v: int(v * 0.5))
-        fw = cw
-        fh = int(im.height * fw / im.width)
-        fg = im.resize((fw, fh), Image.BICUBIC)
-        bg.paste(fg, (0, int(ch * 0.42 - fh / 2)))
-        im = bg
-    _cache[key] = im
-    return im
+    mp = f"{MASKS}/{n}.png"
+    mask = Image.open(mp).convert("L") if os.path.exists(mp) else None
+    _cache[key] = _compose(im, mode, mask)
+    return _cache[key]
 
 
 class Cam:
@@ -92,6 +109,28 @@ def font(path, size):
 
 
 def text_layer(text, kind):
+    if kind in ("note", "sticker"):
+        f = font(FB if kind == "sticker" else "/usr/share/fonts/opentype/inter/Inter-ExtraBold.otf",
+                 66 if kind == "sticker" else 44)
+        lines = text.split("\n")
+        boxes = [f.getbbox(l) for l in lines]
+        lh = int(f.size * 1.22)
+        tw = max(b[2] - b[0] for b in boxes)
+        px, py = (46, 34) if kind == "sticker" else (24, 14)
+        bw, bh = tw + 2 * px, lh * len(lines) + 2 * py - int(f.size * 0.22)
+        pad = 40
+        lay = Image.new("RGBA", (bw + 2 * pad, bh + 2 * pad), (0, 0, 0, 0))
+        sh = Image.new("L", lay.size, 0)
+        ImageDraw.Draw(sh).rounded_rectangle([pad, pad + 6, pad + bw, pad + bh + 6], 28 if kind == "sticker" else 14, fill=120)
+        shadow = Image.new("RGBA", lay.size, (0, 0, 0, 0))
+        shadow.putalpha(sh.filter(ImageFilter.GaussianBlur(12)))
+        lay.alpha_composite(shadow)
+        d = ImageDraw.Draw(lay)
+        d.rounded_rectangle([pad, pad, pad + bw, pad + bh], 28 if kind == "sticker" else 14, fill=(255, 255, 255, 250))
+        for i, (l, b) in enumerate(zip(lines, boxes)):
+            d.text((pad + px + (tw - (b[2] - b[0])) / 2 - b[0], pad + py + i * lh - f.getbbox("Ag")[1]), l, font=f,
+                   fill=(18, 18, 18, 255))
+        return lay
     if kind == "main":
         path, size, fill, sw = FB, 92, YEL, 8
     elif kind == "big":
@@ -112,7 +151,6 @@ def text_layer(text, kind):
     lay = Image.new("RGBA", (tw + 2 * pad, th + 2 * pad), (0, 0, 0, 0))
     d = ImageDraw.Draw(lay)
     d.text((pad - bb[0], pad - bb[1]), text, font=f, fill=fill + (255,), stroke_width=sw, stroke_fill=(0, 0, 0, 255))
-    # soft drop shadow
     a = lay.split()[3]
     sh = Image.new("RGBA", lay.size, (0, 0, 0, 0))
     sh.putalpha(a.filter(ImageFilter.GaussianBlur(9)).point(lambda v: int(v * 0.55)))
@@ -122,17 +160,25 @@ def text_layer(text, kind):
     return out
 
 
-def paste_text(img, lay, ycenter, age):
-    """Pop-in animation: scale 1.25 -> 1.0, fade in."""
-    k = ease_out(age / 0.16)
-    s = 1.25 - 0.25 * k
+def paste_text(img, lay, ycenter, age, xcenter=W / 2, rot=0.0, bounce=False):
+    """Pop-in animation: scale 1.25 -> 1.0 (with overshoot for stickers), fade in."""
+    if bounce:
+        k = min(age / 0.35, 1)
+        s = 1 + 0.35 * math.exp(-k * 5) * math.cos(k * 9) - 0.35 * (1 - k) ** 6 if k < 1 else 1
+        s = max(s, 0.05) if age > 0.02 else 0.3
+        k = min(age / 0.1, 1)
+    else:
+        k = ease_out(age / 0.16)
+        s = 1.25 - 0.25 * k
+    if rot:
+        lay = lay.rotate(rot, Image.BICUBIC, expand=True)
     if abs(s - 1) > 1e-3:
         lay = lay.resize((max(1, int(lay.width * s)), max(1, int(lay.height * s))), Image.BICUBIC)
     if k < 1:
         a = lay.split()[3].point(lambda v: int(v * k))
         lay = lay.copy()
         lay.putalpha(a)
-    img.alpha_composite(lay, (int(W / 2 - lay.width / 2), int(ycenter - lay.height / 2)))
+    img.alpha_composite(lay, (int(xcenter - lay.width / 2), int(ycenter - lay.height / 2)))
 
 
 # ---------------------------------------------------------------- HUD (camcorder)
@@ -250,7 +296,7 @@ _props = {}
 
 def prop(name):
     if name not in _props:
-        _props[name] = {"duck": make_duck, "ufo": make_ufo, "banner": make_banner, "ticker": make_ticker,
+        _props[name] = {"duck": make_duck, "ufo": make_ufo, "banner": make_banner, "ticker": make_ticker, "mothership": make_mothership,
                         "fire": lambda: noise_tex(2 * H, W, 7),
                         "smoke": lambda: noise_tex(H, W, 11, ((3, 6), (6, 12), (12, 24)))}[name]()
     return _props[name]
@@ -300,25 +346,6 @@ def fx_flood(a, tl, S, cam):
     return np.asarray(img.convert("RGB"), np.float32)
 
 
-def fx_blackout(a, tl, S, cam):
-    flick = [1, 0.12, 0.9, 0.05, 0.6, 0.04, 0.04, 0.3, 0.04]
-    if tl < 0.4:
-        lvl = 1.0
-    elif tl < 0.4 + len(flick) / FPS * 1.5:
-        lvl = flick[int((tl - 0.4) * FPS / 1.5)]
-    else:
-        lvl = 0.04
-    dark = a * np.array([0.35, 0.42, 0.6], np.float32)
-    if tl < 1.0:
-        return a * lvl + dark * 0 if lvl > 0.5 else a * lvl * np.array([0.6, 0.7, 1.0], np.float32)
-    k = ease_out((tl - 1.0) / 0.45)
-    cx = W * (0.25 + 0.27 * k) + 12 * math.sin(tl * 7)
-    cy = H * (0.62 - 0.22 * k) + 10 * math.cos(tl * 5)
-    r = 330
-    m = np.exp(-(((X - cx) ** 2 + (Y - cy) ** 2) / (2 * r * r)) ** 1.6)
-    halo = np.exp(-((X - cx) ** 2 + (Y - cy) ** 2) / (2 * (r * 2.2) ** 2)) * 0.12
-    light = (0.035 + 1.1 * m + halo)[..., None]
-    return a * light * np.array([1.05, 1.0, 0.92], np.float32)
 
 
 def fx_fire(a, tl, S, cam):
@@ -350,32 +377,112 @@ def fx_fire(a, tl, S, cam):
     return out
 
 
+def fx_feriado(a, tl, S, cam):
+    return a * np.array([1.02, 1.0, 0.97], np.float32)
+
+
+def fx_blackout(a, tl, S, cam):
+    """Power cut: only the laparoscopy monitor keeps glowing."""
+    flick = [1, 0.12, 0.9, 0.05, 0.6, 0.04, 0.04, 0.3, 0.04]
+    if tl < 0.4:
+        return a
+    if tl < 0.4 + len(flick) / FPS * 1.5:
+        lvl = flick[int((tl - 0.4) * FPS / 1.5)]
+        if lvl > 0.5:
+            return a * lvl
+    else:
+        lvl = 0.0
+    x0, y0 = cam.map(0.615, 0.205)
+    x1, y1 = cam.map(0.875, 0.375)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    sx, sy = (x1 - x0) / 2, (y1 - y0) / 2
+    scr = np.clip(1 - np.maximum(np.abs(X - cx) / sx, np.abs(Y - cy) / sy), 0, 0.04) / 0.04
+    pulse = 0.93 + 0.07 * math.sin(tl * 21) * math.sin(tl * 13)
+    r = 360
+    glow = np.exp(-(((X - cx) / 1.3) ** 2 + (Y - cy) ** 2) / (2 * r * r)) * pulse
+    light = (0.012 + lvl * 0.5 + 1.0 * glow ** 1.3)[..., None] * np.array([1.0, 0.68, 0.70], np.float32)
+    light = light * (1 - scr[..., None]) + scr[..., None] * 1.05
+    return a * light
+
+
+_wave_tex = None
+
+
 def fx_tsunami(a, tl, S, cam):
-    g = gray(a)
-    out = (a * 0.65 + g * 0.35) * np.array([0.78, 0.9, 1.05], np.float32) * 0.86
+    global _wave_tex
+    D = S["dur"]
+    mk = S["mk"][..., None]
+    if _wave_tex is None:
+        _wave_tex = (noise_tex(2 * H, W, 31, ((30, 3), (70, 6), (150, 12), (300, 24))),
+                     noise_tex(2 * H, W, 37, ((8, 14), (16, 28), (32, 56), (64, 112))))
+    streak, foamn = _wave_tex
+    # storm sky
+    sky = (np.array([28, 38, 48], np.float32) * (1 - Y / H) + np.array([88, 104, 110], np.float32) * (Y / H))[..., None, :] \
+        if False else None
+    g = np.clip(Y / (H * 0.7), 0, 1)[..., None]
+    sky = np.array([26, 34, 44], np.float32) * (1 - g) + np.array([92, 106, 112], np.float32) * g
+    sm = prop("smoke")
+    sky = sky * (0.75 + 0.35 * np.roll(sm, int(tl * 40), axis=1)[..., None])
+    sky = np.broadcast_to(sky, (H, W, 3)).copy()
+    # giant wave rising behind
+    k = ease((tl + 0.1) / (D - 0.4))
+    ytop = H * 0.66 - (H * 0.66 - H * 0.27) * k
+    xs = X[0]
+    rag = foamn[int(tl * 90) % H, :] - 0.5
+    crest = (ytop + 55 * np.sin(xs / 170 + tl * 1.3) + 22 * np.sin(xs / 61 - tl * 2.4) - (0.5 - xs / W) * 150
+             + 46 * rag)
+    d = Y - crest[None, :]
+    off = int(tl * 160) % H
+    st = streak[(H - off):(2 * H - off)]
+    fn = foamn[off:off + H]
+    body_t = np.clip(d / 700, 0, 1)[..., None]
+    lip = np.array([60, 140, 128], np.float32)
+    deep = np.array([6, 26, 36], np.float32)
+    wave = lip * (1 - body_t) ** 1.5 + deep * (1 - (1 - body_t) ** 1.5)
+    wave = wave * (0.78 + 0.28 * st[..., None] + 0.3 * fn[..., None])
+    dp = np.clip(d, 0, None)
+    foam = np.clip(np.exp(-(dp / 55) ** 2) * (0.75 + 0.5 * fn), 0, 1)
+    drip = np.clip((fn - 0.58) * 3.5, 0, 1) * np.exp(-dp / 320) * (st > 0.45)
+    foam = np.clip(foam + drip, 0, 1)
+    wave = wave * (1 - foam[..., None]) + foam[..., None] * np.array([228, 236, 234], np.float32)
+    inside = d > 0
+    bgimg = np.where(inside[..., None], wave, sky)
+    up = np.clip(-d, 0, None)
+    mist = np.exp(-up / 140) * (~inside) * np.clip(0.2 + 0.9 * fn, 0, 1)
+    bgimg = bgimg * (1 - mist[..., None] * 0.8) + mist[..., None] * np.array([205, 215, 218], np.float32) * 0.8
+    # foreground: cool storm grade, lightning
+    lightning = 0.0
+    for lt in (0.85, 1.55):
+        if lt <= tl < lt + 0.18:
+            lightning = max(lightning, (1 - (tl - lt) / 0.18) * (1 if int((tl - lt) * FPS) != 1 else 0.3))
+    gr = gray(a)
+    fg = (a * 0.7 + gr * 0.3) * np.array([0.74, 0.84, 0.92], np.float32) * (0.82 + 0.5 * lightning)
+    bgimg = bgimg * (1 + 0.8 * lightning)
+    rim = np.clip(np.asarray(Image.fromarray((S["mk"] * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(10)),
+                             np.float32) / 255 - S["mk"], 0, 1)[..., None]
+    fg = fg + rim * np.array([120, 150, 160], np.float32) * 0.8
+    out = bgimg * mk + fg * (1 - mk)
     # rain
     rng = np.random.default_rng(5)
     N = 230
     x0, y0, ln = rng.random(N) * (W + 400), rng.random(N) * (H + 200), rng.uniform(50, 110, N)
     lay = Image.new("L", (W, H), 0)
-    d = ImageDraw.Draw(lay)
+    dr = ImageDraw.Draw(lay)
     for i in range(N):
         y = (y0[i] + 2600 * tl) % (H + 200) - 100
         x = (x0[i] - 700 * tl) % (W + 400) - 200
-        d.line([(x, y), (x - ln[i] * 0.27, y + ln[i])], fill=110, width=2)
-    out += (np.asarray(lay, np.float32) / 255)[..., None] * 140
-    # incoming wave wipe (last 0.5s)
-    D = S["dur"]
-    if tl > D - 0.55:
-        k = (tl - (D - 0.55)) / 0.55
-        front = -0.3 * W + k * 1.7 * W + 110 * np.sin(Y / 95 + tl * 9) + 40 * np.sin(Y / 31)
-        tex = prop("fire")
-        n = tex[:H] if True else None
-        inside = (X < front)
-        wcol = np.array([18, 58, 72], np.float32)[None, None] + (n[..., None] * 60)
-        out = np.where(inside[..., None], wcol, out)
-        foam = np.exp(-((X - front) ** 2) / (2 * 75 ** 2)) * (0.45 + 0.55 * n)
-        out += foam[..., None] * 230
+        dr.line([(x, y), (x - ln[i] * 0.27, y + ln[i])], fill=100, width=2)
+    out += (np.asarray(lay, np.float32) / 255)[..., None] * 130
+    # final: the wave crashes over the camera (top-down)
+    if tl > D - 0.4:
+        kk = (tl - (D - 0.4)) / 0.4
+        front = -0.25 * H + kk * 1.45 * H + 90 * np.sin(X / 110 + tl * 7) + 35 * np.sin(X / 37)
+        n2 = foamn[:H]
+        ins = Y < front
+        wcol = np.array([14, 50, 62], np.float32) + n2[..., None] * 70
+        out = np.where(ins[..., None], wcol, out)
+        fo = np.exp(-((Y - front) ** 2) / (2 * 70 ** 2)) * (0.45 + 0.55 * n2)
+        out += fo[..., None] * 225
     img = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).convert("RGBA")
     b = prop("banner")
     by = 300 - int(200 * (1 - ease_out((tl - 0.05) / 0.25)))
@@ -431,77 +538,255 @@ def fx_quake(a, tl, S, cam):
     return np.asarray(img.convert("RGB"), np.float32)
 
 
-METEORS = [(0.10, 1.05, -0.1, 0.62), (0.55, 0.85, -0.15, 0.55), (0.95, 1.2, 0.05, 0.6), (1.35, 0.6, -0.12, 0.66)]
+# (start time, entry x, entry y, angle (rad, below horizontal, moving left), speed px/s, size)
+METEORS = [(0.05, 1.10, 0.02, 0.55, 2300, 1.0), (0.45, 0.95, -0.05, 0.75, 2000, 0.7), (0.80, 1.15, 0.12, 0.42, 2600, 1.25),
+           (1.30, 0.70, -0.06, 0.95, 1700, 0.6), (1.65, 1.08, 0.05, 0.6, 2400, 0.9)]
+HORIZON = 0.50  # fraction of output height where meteors hit (behind the people)
+
+
+def meteor_path(m, tl):
+    t0, x0, y0, ang, sp, sz = m
+    dx, dy = -math.cos(ang), math.sin(ang)
+    sx, sy = x0 * W, y0 * H
+    t_imp = (HORIZON * H - sy) / (dy * sp)
+    return sx, sy, dx, dy, sp, sz, t0 + t_imp
 
 
 def meteor_impacts():
-    out = []
-    for (t0, x0, y0, ang) in METEORS:
-        out.append(t0 + 0.42)
-    return out
+    return [meteor_path(m, 0)[6] for m in METEORS]
+
+
+_sky_m = None
 
 
 def fx_meteor(a, tl, S, cam):
-    g = np.clip(1 - Y / (H * 0.55), 0, 1)[..., None]
-    out = a * np.array([1.0, 0.82, 0.9], np.float32) * 0.78 + g * np.array([90, 30, 70], np.float32) * 0.6
-    lay = Image.new("RGB", (W, H), (0, 0, 0))
-    d = ImageDraw.Draw(lay)
+    global _sky_m
+    mk = S["mk"]
+    if _sky_m is None:
+        _sky_m = noise_tex(H, 2 * W, 41, ((6, 4), (12, 8), (24, 16), (48, 32)))
+    hz = HORIZON * H
+    g = np.clip(Y / hz, 0, 1)
+    sky = (np.array([12, 6, 9], np.float32) * (1 - g[..., None]) + np.array([120, 36, 14], np.float32) * g[..., None] ** 2.2
+           + np.array([255, 120, 40], np.float32) * (g[..., None] ** 14) * 0.8)
+    sky = np.broadcast_to(sky, (H, W, 3)).copy()
+    cl = _sky_m[:, int(tl * 30) % W:int(tl * 30) % W + W]
+    sky = sky * (0.35 + 0.8 * cl[..., None]) + (cl[..., None] ** 3) * np.array([110, 40, 15], np.float32) * g[..., None] ** 2
+    head = Image.new("RGB", (W, H), (0, 0, 0))
+    dh = ImageDraw.Draw(head)
+    smoke = Image.new("L", (W, H), 0)
+    ds = ImageDraw.Draw(smoke)
     flash = 0.0
-    for (t0, x0, y0, ang) in METEORS:
+    fire = np.zeros((H, W), np.float32)
+    for m in METEORS:
+        sx, sy, dx, dy, sp, sz, timp = meteor_path(m, tl)
+        t0 = m[0]
         if tl < t0:
             continue
-        dt = tl - t0
-        sp = 3600
-        dx, dy = -math.cos(ang), math.sin(ang)
-        hx, hy = x0 * W + dx * sp * dt, y0 * H + dy * sp * dt
-        if dt < 0.42:
-            for wdt, colr, Lm in [(26, (120, 40, 10), 700), (12, (255, 150, 40), 520), (4, (255, 245, 210), 360)]:
-                d.line([(hx, hy), (hx - dx * Lm, hy - dy * Lm)], fill=colr, width=wdt)
-            d.ellipse([hx - 14, hy - 14, hx + 14, hy + 14], fill=(255, 250, 230))
-        imp = t0 + 0.42
-        if tl >= imp:
-            flash += math.exp(-(tl - imp) / 0.12)
-    glow = np.asarray(lay.filter(ImageFilter.GaussianBlur(14)), np.float32)
-    out += np.asarray(lay, np.float32) * 0.9 + glow * 1.6
-    out += flash * np.array([255, 190, 120], np.float32) * 0.55
+        tt = min(tl, timp) - t0
+        hx, hy = sx + dx * sp * tt, sy + dy * sp * tt
+        # lingering smoke trail
+        age = max(0.0, tl - timp)
+        sa = int(150 * math.exp(-age / 0.9))
+        ds.line([(sx - dx * 200, sy - dy * 200), (hx, hy)], fill=sa, width=int(26 * sz + 40 * min(tl - t0, 1.5)))
+        if tl < timp:
+            L = 950 * sz
+            segs = 36
+            for i in range(segs, 0, -1):
+                f0, f1 = (i - 1) / segs, i / segs
+                col = (int(255), int(255 - 150 * f1), int(235 - 225 * f1))
+                fade = (1 - f1) ** 1.6
+                w_ = max(1, int((15 * sz) * (1 - f1) ** 0.8 + 1))
+                dh.line([(hx - dx * L * f0, hy - dy * L * f0), (hx - dx * L * f1, hy - dy * L * f1)],
+                        fill=tuple(int(c * fade) for c in col), width=w_)
+            r = 11 * sz
+            dh.ellipse([hx - r, hy - r, hx + r, hy + r], fill=(255, 250, 235))
+            # breakup fragments
+            for j in range(3):
+                fx_, fy_ = hx - dx * (60 + 40 * j) * sz + (j - 1) * 14 * dy, hy - dy * (60 + 40 * j) * sz - (j - 1) * 14 * dx
+                dh.ellipse([fx_ - 2, fy_ - 2, fx_ + 2, fy_ + 2], fill=(255, 200, 120))
+        else:
+            # ground impact behind the people: fireball + glow
+            age = tl - timp
+            flash += math.exp(-age / 0.13) * sz
+            rr = 40 + 230 * (1 - math.exp(-age / 0.3)) * sz
+            ix = hx
+            fb = np.exp(-(((X - ix) / 1.6) ** 2 + ((Y - hz) * 1.0) ** 2) / (2 * rr * rr)) * math.exp(-age / 0.9)
+            fire += fb.astype(np.float32)
+            colh = int(min(age, 1.5) * 500 * sz)
+            ds.ellipse([ix - 120 * sz - colh * 0.2, hz - colh - 60, ix + 120 * sz + colh * 0.2, hz + 40], fill=int(170 * min(1, age * 3)))
+    smoke_a = np.asarray(smoke.filter(ImageFilter.GaussianBlur(16)), np.float32)[..., None] / 255
+    sky = sky * (1 - 0.55 * smoke_a) + smoke_a * np.array([70, 50, 45], np.float32) * 0.55
+    hd = np.asarray(head, np.float32)
+    glow = np.asarray(head.filter(ImageFilter.GaussianBlur(26)), np.float32)
+    glow2 = np.asarray(head.filter(ImageFilter.GaussianBlur(6)), np.float32)
+    sky = sky + hd + glow2 * 1.0 + glow * 2.6
+    sky = sky + np.clip(fire, 0, 1.4)[..., None] * np.array([255, 120, 35], np.float32) * 1.2 + flash * np.array([255, 170, 100], np.float32) * 0.22
+    # people: dusk grade + orange rim light from the sky behind them
+    gr = gray(a)
+    fg = (a * 0.8 + gr * 0.2) * np.array([0.82, 0.68, 0.62], np.float32) * (0.78 + 0.25 * min(flash, 1.5))
+    rim = np.clip(np.asarray(Image.fromarray((mk * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(12)), np.float32) / 255
+                  - mk, 0, 1)[..., None]
+    fg += rim * np.array([255, 140, 60], np.float32) * (0.9 + 0.8 * min(flash, 1.5))
+    fg += (np.clip(1 - Y / H, 0, 1) ** 2)[..., None] * np.array([90, 35, 10], np.float32) * (0.4 + 0.6 * min(flash, 1))
+    out = sky * mk[..., None] + fg * (1 - mk[..., None])
+    # falling ash & embers in front
+    rng = np.random.default_rng(12)
+    N = 90
+    x0, y0, v, r, ph = rng.random(N) * W, rng.random(N) * H, rng.uniform(80, 220, N), rng.uniform(1.5, 4, N), rng.random(N) * 6
+    pts = [((x0[i] - 90 * tl + 20 * math.sin(tl * 2 + ph[i])) % W, (y0[i] + v[i] * tl) % H, r[i], 0.8) for i in range(N)]
+    em = blob_layer(pts, 1.5)
+    out += em[..., None] * np.array([255, 150, 70], np.float32)
     return out
 
 
+def make_mothership():
+    w, h = int(W * 1.9), 620
+    S2 = 1
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    cx, cy, ax, by = w / 2, 120, w / 2 - 4, 400
+    rings = 9
+    for i in range(rings):
+        f = i / rings
+        c = int(26 + 34 * f)
+        d.ellipse([cx - ax * (1 - f * 0.8), cy - by * (1 - f * 0.8), cx + ax * (1 - f * 0.8), cy + by * (1 - f * 0.8)],
+                  fill=(c, c + 4, c + 12, 255), outline=(c + 38, c + 46, c + 60, 255), width=3)
+    for k in range(48):
+        th = k / 48 * 2 * math.pi
+        if math.sin(th) < 0.05:
+            continue
+        d.line([(cx + ax * 0.22 * math.cos(th), cy + by * 0.22 * math.sin(th)), (cx + ax * math.cos(th), cy + by * math.sin(th))],
+               fill=(18, 20, 26, 255), width=3)
+    # recessed panels
+    rng = np.random.default_rng(3)
+    for _ in range(140):
+        th = rng.uniform(0.08, 0.92) * math.pi
+        rr = rng.uniform(0.3, 0.95)
+        px, py = cx + ax * rr * math.cos(th), cy + by * rr * math.sin(th)
+        s = rng.uniform(10, 34)
+        d.rectangle([px - s, py - s * 0.35, px + s, py + s * 0.35], fill=(16, 18, 24, 255))
+    d.ellipse([cx - 230, cy + by * 0.62 - 70, cx + 230, cy + by * 0.62 + 70], fill=(12, 14, 20, 255), outline=(90, 110, 130, 255), width=4)
+    return im
+
+
+_stars = None
+
+
 def fx_alien(a, tl, S, cam):
-    out = a * np.array([0.72, 1.0, 0.82], np.float32) * 0.78
-    ux = W * 0.5 + 40 * math.sin(tl * 2.1)
-    uy = -260 + (H * 0.16 + 260) * ease_out(tl / 0.55) + 12 * math.sin(tl * 3.3)
-    on = 0.0
-    if tl > 0.6:
-        on = 1.0 if tl > 0.8 else [1, 0, 1, 0, 1, 1][int((tl - 0.6) * FPS) % 6]
+    global _stars
+    D = S["dur"]
+    mk = S["mk"]
+    g = np.clip(Y / (H * 0.5), 0, 1)
+    sky = np.array([4, 7, 16], np.float32) * (1 - g[..., None]) + np.array([18, 34, 58], np.float32) * g[..., None]
+    sky = np.broadcast_to(sky, (H, W, 3)).copy()
+    if _stars is None:
+        rng = np.random.default_rng(77)
+        _stars = (rng.random(260) * W, rng.random(260) * H * 0.6, rng.uniform(0.6, 2.0, 260), rng.random(260) * 6)
+    sxs, sys_, srs, sph = _stars
+    st = blob_layer([(sxs[i], sys_[i], srs[i], 0.5 + 0.5 * math.sin(tl * 5 + sph[i])) for i in range(len(sxs))], 0)
+    sky += st[..., None] * 200
+    img = Image.fromarray(np.clip(sky, 0, 255).astype(np.uint8)).convert("RGBA")
+    ms = prop("mothership")
+    oy = -160 + 70 * ease(tl / D) + 6 * math.sin(tl * 1.3)
+    ox = W / 2 - ms.width / 2 + 10 * math.sin(tl * 0.8)
+    img.alpha_composite(ms, (int(ox), int(oy)))
+    sky = np.asarray(img.convert("RGB"), np.float32)
+    # lights, core and searchlights (additive)
+    lights = Image.new("RGB", (W, H), (0, 0, 0))
+    dl = ImageDraw.Draw(lights)
+    cx, cy, ax, by = ox + ms.width / 2, oy + 120, ms.width / 2 - 4, 400
+    for k in range(34):
+        th = 0.06 * math.pi + k / 33 * 0.88 * math.pi
+        lx, ly = cx + ax * 0.97 * math.cos(th), cy + by * 0.97 * math.sin(th)
+        on = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(tl * 6 - k * 0.6))
+        c = (int(150 * on), int(235 * on), int(255 * on))
+        dl.ellipse([lx - 5, ly - 4, lx + 5, ly + 4], fill=c)
+    core_y = cy + by * 0.62
+    pulse = 0.75 + 0.25 * math.sin(tl * 9)
+    dl.ellipse([cx - 170, core_y - 46, cx + 170, core_y + 46], fill=(int(90 * pulse), int(230 * pulse), int(255 * pulse)))
+    beams = Image.new("L", (W, H), 0)
+    db = ImageDraw.Draw(beams)
+    on = 0.0 if tl < 0.55 else (1.0 if tl > 0.75 else [1, 0, 1, 0, 1, 1][int((tl - 0.55) * FPS) % 6])
+    spots = []
     if on:
-        m = Image.new("L", (W, H), 0)
-        ImageDraw.Draw(m).polygon([(ux - 80, uy + 90), (ux + 80, uy + 90), (ux + 470, H * 0.86), (ux - 470, H * 0.86)], fill=255)
-        mm = np.asarray(m.filter(ImageFilter.GaussianBlur(28)), np.float32) / 255
-        scan = 0.85 + 0.15 * np.sin(Y / 7 - tl * 30)
-        fade = np.clip(1 - (Y - uy) / (H * 0.9), 0.25, 1)
-        beam = mm * scan * fade * on
-        out = out * (1 + 0.45 * beam[..., None]) + beam[..., None] * np.array([90, 255, 140], np.float32) * 0.33
-        rng = np.random.default_rng(4)
-        N = 70
-        px, ph, v = rng.uniform(-1, 1, N), rng.random(N), rng.uniform(200, 500, N)
-        pts = []
-        for i in range(N):
-            yy = H * 0.86 - ((ph[i] * H * 0.7 + v[i] * tl) % (H * 0.7))
-            frac = (yy - uy) / (H * 0.86 - uy)
-            xx = ux + px[i] * (80 + 390 * frac)
-            pts.append((xx, yy, 3, 0.9))
-        out += blob_layer(pts, 2)[..., None] * np.array([170, 255, 190], np.float32)
+        db.polygon([(cx - 150, core_y), (cx + 150, core_y), (cx + 520, H), (cx - 520, H)], fill=70)
+        for side, ph in ((-1, 0.0), (1, 1.7)):
+            bx, byy = cx + side * ax * 0.55, cy + by * 0.82
+            ang = math.pi / 2 + 0.38 * math.sin(tl * 1.6 + ph)
+            tx, ty = bx + math.cos(ang) * H * 1.2, byy + math.sin(ang) * H * 1.2
+            nx, ny = -math.sin(ang), math.cos(ang)
+            db.polygon([(bx - nx * 14, byy - ny * 14), (bx + nx * 14, byy + ny * 14), (tx + nx * 170, ty + ny * 170),
+                        (tx - nx * 170, ty - ny * 170)], fill=110)
+            t_ = (H * 0.55 - byy) / max(math.sin(ang), 0.2)
+            spots.append((bx + math.cos(ang) * t_, H * 0.55))
+    lights_a = np.asarray(lights, np.float32)
+    lg = np.asarray(lights.filter(ImageFilter.GaussianBlur(10)), np.float32)
+    beam_a = np.asarray(beams.filter(ImageFilter.GaussianBlur(26)), np.float32)[..., None] / 255
+    sky = sky + lights_a + lg * 2.0 + beam_a * np.array([140, 230, 255], np.float32) * 1.3
+    # people: cold sci-fi grade + cyan rim + moving searchlight spots
+    gr = gray(a)
+    fg = (a * 0.65 + gr * 0.35) * np.array([0.62, 0.8, 0.95], np.float32) * 0.78
+    rim = np.clip(np.asarray(Image.fromarray((mk * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(12)), np.float32) / 255
+                  - mk, 0, 1)[..., None]
+    fg += rim * np.array([120, 220, 255], np.float32) * 1.1
+    for (sx_, sy_) in spots:
+        sp = np.exp(-(((X - sx_) / 1.2) ** 2 + (Y - sy_) ** 2) / (2 * 230 ** 2))[..., None]
+        fg = fg * (1 + 0.9 * sp) + sp * np.array([60, 110, 130], np.float32)
+    out = sky * mk[..., None] + fg * (1 - mk[..., None])
+    out += beam_a * np.array([140, 230, 255], np.float32) * 0.18  # volumetric haze in front
+    # ---- HUD scan
+    ys = (tl - 0.7) / 1.0 * H * 1.1
+    if 0 < ys < H * 1.3:
+        gy = gray(out)[..., 0]
+        e = np.abs(np.diff(gy, axis=1, append=gy[:, -1:])) + np.abs(np.diff(gy, axis=0, append=gy[-1:, :]))
+        e = np.clip((e - 12) / 40, 0, 1)
+        win = np.clip(np.exp(-(ys - Y) / 260), 0, 1) * (Y < ys)
+        out += (e * win)[..., None] * np.array([80, 230, 255], np.float32) * 0.9
+        line = np.exp(-((Y - ys) ** 2) / (2 * 5 ** 2))
+        out += line[..., None] * np.array([150, 240, 255], np.float32) * 1.4
+        out += (np.exp(-((Y - ys) ** 2) / (2 * 60 ** 2)) * 0.25)[..., None] * np.array([60, 200, 255], np.float32)
     img = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).convert("RGBA")
-    ufo = prop("ufo").rotate(4 * math.sin(tl * 2.6), Image.BICUBIC, expand=True)
-    img.alpha_composite(ufo, (int(ux - ufo.width / 2), int(uy - ufo.height / 2)))
     d = ImageDraw.Draw(img)
-    cols = [(255, 60, 60), (255, 220, 60), (60, 220, 255), (120, 255, 120)]
-    for i in range(7):
-        lx = ux - 170 + i * 57
-        c = cols[(i + int(tl * 8)) % 4]
-        d.ellipse([lx - 9, uy + 40 - 9, lx + 9, uy + 40 + 9], fill=c + (255,))
-    return np.asarray(img.convert("RGB"), np.float32)
+    cyan = (120, 235, 255, 255)
+    fm = font(FMONO, 30)
+    fs = font(FMONO, 26)
+    head = "SCAN BIOMÉTRICO  >>  2 ALVOS"
+    n = int(max(0, tl - 0.7) * 40)
+    d.text((110, 330), head[:n], font=fm, fill=cyan)
+    targets = [((0.33, 0.30), "ALVO 01: HUMANO", "SONO: 4h EM 72h", 1.05),
+               ((0.735, 0.405), "ALVO 02: HUMANO", "CAFEÍNA: 87%", 1.3)]
+    for (fxy, l1, l2, tlock) in targets:
+        if tl < tlock:
+            continue
+        px, py = cam.map(*fxy)
+        k = ease_out((tl - tlock) / 0.3)
+        sz = 190 - 80 * k
+        rot = (1 - k) * 0.8
+        col = cyan if k < 1 or int(tl * 6) % 2 else (255, 90, 90, 255)
+        for (sx, sy) in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+            cxr, cyr = px + sx * sz, py + sy * sz
+            p1 = (cxr - sx * 40, cyr)
+            p2 = (cxr, cyr - sy * 40)
+            rp = lambda p: (px + (p[0] - px) * math.cos(rot) - (p[1] - py) * math.sin(rot),
+                            py + (p[0] - px) * math.sin(rot) + (p[1] - py) * math.cos(rot))
+            d.line([rp(p1), rp((cxr, cyr)), rp(p2)], fill=col, width=5)
+        if k >= 1:
+            tx = px + 130 if px < W * 0.6 else px - 400
+            d.line([(px + (110 if tx > px else -110), py - 110), (tx + (0 if tx > px else 270), py - 150)], fill=cyan, width=2)
+            d.text((tx, py - 190), l1, font=fs, fill=cyan)
+            d.text((tx, py - 160), l2, font=fs, fill=(255, 255, 255, 255))
+    a2 = np.asarray(img.convert("RGB"), np.float32)
+    # occasional signal glitch
+    for gt in (0.58, 1.95):
+        if gt <= tl < gt + 0.1:
+            rng = np.random.default_rng(int(tl * 100))
+            for _ in range(7):
+                y0 = int(rng.random() * H)
+                hgt = int(rng.uniform(10, 60))
+                a2[y0:y0 + hgt] = np.roll(a2[y0:y0 + hgt], int(rng.uniform(-60, 60)), axis=1)
+            a2[..., 0] = np.roll(a2[..., 0], 8, axis=1)
+            a2[..., 2] = np.roll(a2[..., 2], -8, axis=1)
+    return a2
 
 
 _frost = None
@@ -577,7 +862,7 @@ def cam_end(tl, D):
     if tl < 1.6:
         return (0.42, 0.42, 1.0 + 0.04 * tl)
     k = ease_out((tl - 1.6) / 0.25)
-    return (0.42 - 0.17 * k, 0.42 - 0.08 * k, 1.06 + 0.5 * k)
+    return (0.42 - 0.06 * k, 0.42 - 0.04 * k, 1.06 + 0.16 * k)
 
 
 def shake_none(tl, D):
@@ -591,9 +876,9 @@ def shake_quake(tl, D):
 
 def shake_meteor(tl, D):
     s = 0
-    for t in meteor_impacts():
+    for t, m in zip(meteor_impacts(), METEORS):
         if tl >= t:
-            s += 30 * math.exp(-(tl - t) / 0.15)
+            s += 24 * m[5] * math.exp(-(tl - t) / 0.18)
     return (s * math.sin(tl * 90), s * math.cos(tl * 70), 0.03 * s * math.sin(tl * 60))
 
 
@@ -602,41 +887,48 @@ def shake_soft(amp):
 
 
 def shake_tsunami(tl, D):
-    amp = 6 + (22 if tl > D - 0.55 else 0)
+    amp = 4 + 10 * ease(tl / D) + (22 if tl > D - 0.4 else 0)
     return (amp * math.sin(tl * 41), amp * math.cos(tl * 37), 0.04 * amp * math.sin(tl * 29))
 
 
 def shake_alien(tl, D):
-    a = 10 * math.exp(-max(tl - 0.6, 0) / 0.3) if tl > 0.6 else 0
+    a = 9 * math.exp(-max(tl - 0.55, 0) / 0.3) if tl > 0.55 else 2
     return (a * math.sin(tl * 70), a * math.cos(tl * 60), 0)
 
 
-MY, SY = 0.60, 0.665
+MY = 0.60
+# captions: (t_in, t_out, text, kind, y, x, rotation)
 SCENES = [
-    dict(name="intro", img=9, mode="fit", dur=2.4, cam=cam_static(0.5, 0.5, 1.02, 1.10), shake=shake_none, fx=None,
-         caps=[(0.05, None, "A equipe da cirurgia geral", "white", 0.665), (0.75, None, "em QUALQUER situação:", "main", 0.72)]),
-    dict(name="enchente", img=5, mode="cover", dur=2.2, cam=cam_static(0.56, 0.42, 1.04, 1.12), shake=shake_soft(3), fx=fx_flood,
-         caps=[(0.1, None, "Na enchente", "main", MY), (0.75, None, "(o patinho é o instrumentador)", "sub", SY)]),
-    dict(name="apagao", img=2, mode="cover", dur=2.3, cam=cam_static(0.5, 0.4, 1.0, 1.08), shake=shake_none, fx=fx_blackout,
-         caps=[(0.1, None, "No apagão", "main", MY), (1.15, None, "(gerador? que gerador?)", "sub", SY)]),
-    dict(name="incendio", img=12, mode="cover", dur=2.2, cam=cam_static(0.5, 0.45, 1.04, 1.12), shake=shake_soft(4), fx=fx_fire,
-         caps=[(0.1, None, "No incêndio", "main", MY), (0.7, None, "(selfie primeiro, extintor depois)", "sub", SY)]),
-    dict(name="tsunami", img=6, mode="cover", dur=2.4, cam=cam_static(0.5, 0.45, 1.06, 1.14), shake=shake_tsunami, fx=fx_tsunami,
-         caps=[(0.1, None, "No tsunami", "main", MY), (0.7, None, "(ninguém larga a pinça)", "sub", SY)]),
-    dict(name="terremoto", img=1, mode="cover", dur=2.2, cam=cam_static(0.45, 0.33, 1.12, 1.18), shake=shake_quake, fx=fx_quake,
-         caps=[(0.1, None, "No terremoto", "main", MY), (0.7, None, "(magnitude 8.9 e o biquinho nem tremeu)", "sub", SY)]),
-    dict(name="meteoros", img=7, mode="cover", dur=2.2, cam=cam_static(0.45, 0.42, 1.06, 1.12), shake=shake_meteor, fx=fx_meteor,
-         caps=[(0.1, None, "Na chuva de meteoros", "main", MY), (0.7, None, "(tudo sob controle, chefe)", "sub", SY)]),
-    dict(name="aliens", img=11, mode="cover", dur=2.6, cam=cam_static(0.5, 0.38, 1.02, 1.10), shake=shake_alien, fx=fx_alien,
-         caps=[(0.1, None, "Na invasão alienígena", "main", MY), (0.9, None, "(abdução só depois da sutura)", "sub", SY)]),
-    dict(name="nevasca", img=8, mode="cover", dur=2.1, cam=cam_static(0.45, 0.38, 1.03, 1.10), shake=shake_soft(2), fx=fx_snow,
-         caps=[(0.1, None, "Na nevasca", "main", MY), (0.7, None, "(vulgo ar-condicionado do centro cirúrgico)", "sub", SY)]),
+    dict(name="feriado", img=2, mode="cover", dur=2.3, cam=cam_static(0.5, 0.36, 1.0, 1.22), shake=shake_none, fx=fx_feriado,
+         caps=[(0.25, None, "Você trabalha\nno feriado?", "sticker", 0.66, 0.5, 3)]),
+    dict(name="intro", img=9, mode="fit", dur=2.3, cam=cam_static(0.5, 0.5, 1.02, 1.10), shake=shake_none, fx=None,
+         caps=[(0.05, None, "A equipe da cirurgia geral", "white", 0.665), (0.7, None, "em QUALQUER situação:", "main", 0.72)]),
+    dict(name="enchente", img=6, mode="cover", dur=2.3, cam=cam_static(0.5, 0.42, 1.03, 1.10), shake=shake_soft(3), fx=fx_flood,
+         caps=[(0.1, None, "Na enchente", "main", MY), (0.8, None, "o patinho é o\ninstrumentador", "note", 0.43, 0.62, 5)]),
+    dict(name="apagao", img=4, mode="cover", dur=2.3, cam=cam_static(0.5, 0.40, 1.0, 1.08), shake=shake_none, fx=fx_blackout,
+         caps=[(0.1, None, "No apagão", "main", MY), (1.1, None, "gerador? que gerador?", "note", 0.47, 0.36, -5)]),
+    dict(name="incendio", img=12, mode="cover", dur=2.2, cam=cam_static(0.40, 0.45, 1.04, 1.12), shake=shake_soft(4), fx=fx_fire,
+         caps=[(0.1, None, "No incêndio", "main", MY), (0.7, None, "selfie primeiro,\nextintor depois", "note", 0.49, 0.70, 6)]),
+    dict(name="tsunami", img=5, mode="cover", dur=3.0, cam=cam_static(0.50, 0.45, 1.03, 1.10), shake=shake_tsunami,
+         fx=fx_tsunami, caps=[(0.1, None, "No tsunami", "main", MY),
+                              (0.9, None, "só sai quando o\nchefe liberar", "note", 0.755, 0.33, -4)]),
+    dict(name="terremoto", img=1, mode="cover", dur=2.2, cam=cam_static(0.40, 0.33, 1.12, 1.18), shake=shake_quake, fx=fx_quake,
+         caps=[(0.1, None, "No terremoto", "main", MY),
+               (0.7, None, "8.9 na escala Richter\ne o biquinho nem tremeu", "note", 0.745, 0.5, -3)]),
+    dict(name="meteoros", img=7, mode="fitw", dur=2.9, cam=cam_static(0.5, 0.5, 1.0, 1.05), shake=shake_meteor, fx=fx_meteor,
+         caps=[(0.1, None, "Na chuva de meteoros", "main", MY), (1.0, None, "tudo sob controle,\nchefe", "note", 0.74, 0.30, 4)]),
+    dict(name="aliens", img=11, mode="cover", dur=3.1, cam=cam_static(0.5, 0.40, 1.0, 1.06), shake=shake_alien, fx=fx_alien,
+         caps=[(0.1, None, "Na invasão alienígena", "main", MY),
+               (1.9, None, "abdução só depois\nda sutura", "note", 0.755, 0.5, -3)]),
+    dict(name="nevasca", img=8, mode="cover", dur=2.1, cam=cam_static(0.40, 0.38, 1.06, 1.12), shake=shake_soft(2), fx=fx_snow,
+         caps=[(0.1, None, "Na nevasca", "main", MY), (0.7, None, "vulgo ar-condicionado\ndo centro cirúrgico", "note", 0.44, 0.68, 6)]),
     dict(name="perigo", img=10, mode="cover", dur=3.3, cam=cam_danger, shake=shake_none, fx=fx_danger,
          caps=[(0.1, 0.95, "Mas o maior perigo de todos...", "main", MY), (1.2, None, "...é esse olhar aqui", "big", 0.70)]),
     dict(name="copa", img=3, mode="cover", dur=3.9, cam=cam_end, shake=shake_none, fx=fx_end,
          caps=[(0.1, 1.6, "E a única tragédia que", "white", 0.60), (0.1, 1.6, "ninguém sobrevive:", "main", 0.655),
-               (1.65, None, "acabar o café da copa", "big", 0.66), (2.25, None, "(socorro)", "sub", 0.715)]),
+               (1.65, None, "acabar o café da copa", "big", 0.66), (2.25, None, "socorro", "note", 0.74, 0.72, 8)]),
 ]
+
 
 _vig = None
 _grain = None
@@ -647,7 +939,7 @@ def render_frame(si, f, gframe):
     S = SCENES[si]
     D = S["dur"]
     tl = f / FPS
-    base = load_base(S["img"], S["mode"])
+    base, mask = load_base(S["img"], S["mode"])
     fx_, fy_, z = S["cam"](tl, D)
     if si > 0:
         z *= 1 + 0.07 * math.exp(-tl / 0.09)  # punch-in on cut
@@ -656,11 +948,14 @@ def render_frame(si, f, gframe):
         z *= 1.06
     cam = Cam(base, fx_, fy_, z, dx, dy)
     img = cam.render(base)
+    mimg = cam.render(mask) if mask is not None else None
     if rot:
         img = img.rotate(rot, Image.BICUBIC)
+        if mimg is not None:
+            mimg = mimg.rotate(rot, Image.BICUBIC)
     a = np.asarray(img, np.float32)
+    S["mk"] = np.asarray(mimg, np.float32) / 255 if mimg is not None else None
     if S["fx"]:
-        S["dur"] = D
         a = S["fx"](a, tl, S, cam)
     if _vig is None:
         r2 = ((X - W / 2) / W) ** 2 + ((Y - H / 2) / H) ** 2
@@ -670,12 +965,15 @@ def render_frame(si, f, gframe):
     a = a * _vig
     img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)).convert("RGBA")
     hud(img, gframe)
-    for (t0, t1, text, kind, yc) in S["caps"]:
+    for cap in S["caps"]:
+        t0, t1, text, kind, yc = cap[:5]
+        xc = cap[5] if len(cap) > 5 else 0.5
+        rr = cap[6] if len(cap) > 6 else 0
         if tl >= t0 and (t1 is None or tl < t1):
             key = ("cap", text, kind)
             if key not in _props:
                 _props[key] = text_layer(text, kind)
-            paste_text(img, _props[key], yc * H, tl - t0)
+            paste_text(img, _props[key], yc * H, tl - t0, xc * W, rr, bounce=kind in ("sticker", "note"))
     a = np.asarray(img.convert("RGB"), np.float32)
     if si > 0 and tl < 0.17:
         k = 1 - tl / 0.17
@@ -759,11 +1057,17 @@ def make_audio(path):
         w = nz(d, 500, 7000) * (T(d) / d) ** 2
         add(s - d, w, 0.35)
         add(s, kick(), 0.75)
-    # intro camcorder beeps
-    add(0.05, tone(1250, 0.08) * 0.5)
-    add(0.2, tone(1250, 0.08) * 0.5)
     sc = dict(zip([S["name"] for S in SCENES], st))
     D = {S["name"]: S["dur"] for S in SCENES}
+    # feriado: sticker pop + room tone
+    s = sc["feriado"]
+    add(s, nz(D["feriado"], 80, 400), 0.04)
+    add(s + 0.25, tone(lambda t: 600 + 900 * np.exp(-t / 0.03), 0.12) * np.exp(-T(0.12) / 0.04), 0.4)
+    add(s + 0.27, tone(1568, 0.25, (1, 2)) * np.exp(-T(0.25) / 0.08), 0.18)
+    # intro camcorder beeps
+    s = sc["intro"]
+    add(s + 0.05, tone(1250, 0.08) * 0.5)
+    add(s + 0.2, tone(1250, 0.08) * 0.5)
     # enchente
     s = sc["enchente"]
     d = D["enchente"]
@@ -773,27 +1077,30 @@ def make_audio(path):
     for q in (0.95, 1.25):
         dd = 0.17
         add(s + q, tone(lambda t: 1500 + 700 * np.sin(2 * np.pi * 28 * t) + 2000 * t, dd, (1, 2, 3)) * np.hanning(int(dd * SR)), 0.22)
-    # apagão
+    # apagão: hum, power-down, then the OR monitor keeps beeping in the dark
     s = sc["apagao"]
     add(s, tone(60, 0.4, (1, 2, 3)) * 0.5, 0.25)
     add(s + 0.4, tone(lambda t: 220 * np.exp(-t * 2.8), 0.75, (1, 2, 3, 4)) * np.linspace(1, 0, int(0.75 * SR)), 0.35)
-    add(s + 1.0, nz(0.012, 2000, 12000), 0.6)
-    add(s + 1.03, nz(0.01, 2000, 12000), 0.4)
+    for q in np.arange(0.1, D["apagao"], 0.55):
+        add(s + q, tone(985, 0.09) * np.minimum(1, (0.09 - T(0.09)) / 0.01), 0.1)
     # incêndio
     s = sc["incendio"]
     d = D["incendio"]
     add(s, nz(d, 30, 500) * np.minimum(1, T(d) / 0.3), 0.55)
     for _ in range(90):
         add(s + rng.uniform(0, d), nz(0.012, 1500, 9000) * np.exp(-T(0.012) / 0.003), rng.uniform(0.15, 0.45))
-    # tsunami (EAS tone + rain + crash)
+    # tsunami: growing roar, EAS tone, thunder, crash
     s = sc["tsunami"]
     d = D["tsunami"]
+    add(s, nz(d, 25, 400) * (T(d) / d) ** 1.5, 0.9)
     eas = (np.sin(2 * np.pi * 853 * T(1.5)) + np.sin(2 * np.pi * 960 * T(1.5))) * np.minimum(1, np.minimum(T(1.5), 1.5 - T(1.5)) / 0.02)
-    add(s + 0.08, eas, 0.11)
-    add(s, nz(d, 2000, 9000), 0.09)
+    add(s + 0.08, eas, 0.09)
+    add(s, nz(d, 2000, 9000), 0.08)
+    for lt in (0.85, 1.55):
+        add(s + lt + 0.05, nz(1.2, 30, 2500) * np.exp(-T(1.2) / 0.35) * np.minimum(1, T(1.2) / 0.01), 0.45)
     cr = nz(1.4, 40, 3500)
     tt = T(1.4)
-    add(s + d - 0.55, cr * np.minimum(1, tt / 0.25) * np.exp(-np.maximum(tt - 0.25, 0) / 0.4), 0.75)
+    add(s + d - 0.4, cr * np.minimum(1, tt / 0.2) * np.exp(-np.maximum(tt - 0.2, 0) / 0.4), 0.8)
     # terremoto
     s = sc["terremoto"]
     d = D["terremoto"]
@@ -801,22 +1108,36 @@ def make_audio(path):
     add(s, nz(d, 110, 700) * 0.3, 0.3)
     for q in (0.3, 0.55, 1.15, 1.4):
         add(s + q, nz(0.04, 900, 6000) * np.exp(-T(0.04) / 0.01), 0.5)
-    # meteoros
+    # meteoros: roaring entries + deep delayed booms
     s = sc["meteoros"]
-    for (t0, *_r) in METEORS:
-        dd = 0.42
-        add(s + t0, nz(dd, 400, 4000) * (T(dd) / dd) ** 1.5, 0.3)
-        add(s + t0 + dd, kick(0.6) * 1.0 + nz(0.6, 30, 300) * np.exp(-T(0.6) / 0.18), 0.6)
-    # aliens
+    add(s, nz(D["meteoros"], 20, 200), 0.25)
+    for m, ti in zip(METEORS, meteor_impacts()):
+        dd = ti - m[0]
+        add(s + m[0], nz(dd, 150, 2500) * (T(dd) / dd) ** 2, 0.25 * m[5])
+        add(s + ti + 0.08, kick(0.9), 0.55 * m[5])
+        add(s + ti + 0.08, nz(1.6, 20, 260) * np.exp(-T(1.6) / 0.45), 0.7 * m[5])
+    # aliens: deep drone, scan sweep, data blips, glitch
     s = sc["aliens"]
     d = D["aliens"]
-    add(s, tone(lambda t: np.where(t < 0.5, 1600 - 1800 * t, 700) + 140 * np.sin(2 * np.pi * 6 * t), d) * np.minimum(1, (d - T(d)) / 0.1), 0.16)
-    add(s, tone(110, d, (1, 3, 5)) * 0.6, 0.08)
-    add(s + 0.6, tone(lambda t: 300 + 3000 * t, 0.3) * np.linspace(1, 0.2, int(0.3 * SR)), 0.2)
+    t = T(d)
+    drone = (tone(46, d, (1, 2, 3, 4, 5, 6)) * (0.6 + 0.4 * np.sin(2 * np.pi * 0.7 * t))) * np.minimum(1, t / 0.4)
+    add(s, drone, 0.22)
+    add(s, tone(92.5, d, (1, 3)) * np.minimum(1, t / 0.6), 0.06)
+    add(s + 0.55, nz(0.35, 400, 6000) * np.exp(-T(0.35) / 0.1), 0.35)
+    add(s + 0.7, tone(lambda t: 400 + 1400 * t, 1.0) * (0.5 + 0.5 * np.sign(np.sin(2 * np.pi * 14 * T(1.0)))), 0.07)
+    for q in (1.05, 1.3):
+        add(s + q, tone(1800, 0.06), 0.15)
+        add(s + q + 0.08, tone(2400, 0.06), 0.15)
+    for q in np.arange(0.8, 1.8, 0.07):
+        add(s + q, tone(rng.uniform(2500, 4200), 0.025), 0.05)
+    for gt in (0.58, 1.95):
+        add(s + gt, nz(0.1, 200, 8000) * (rng.random(int(0.1 * SR)) > 0.5), 0.2)
     # nevasca
     s = sc["nevasca"]
     d = D["nevasca"]
     add(s, nz(d, 250, 1600) * (0.5 + 0.5 * np.sin(T(d) * 3.1) ** 2), 0.3)
+
+
     # perigo: dun dun dunnn
     s = sc["perigo"] + 0.95
     brass = (1, 2, 3, 4, 5, 6)
