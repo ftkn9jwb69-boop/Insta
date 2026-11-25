@@ -110,11 +110,12 @@ const PAL = RL ? {
 const ASIS=[140,640], PT=[900,880];
 const LIG=qpts(ASIS,[520,ASIS[1]+(520-140)*240/760+42],PT,60);
 const ligY=x=>{for(let i=1;i<LIG.length;i++){if(LIG[i][0]>=x){const a=LIG[i-1],b=LIG[i];return lerp(a[1],b[1],(x-a[0])/(b[0]-a[0]));}}return PT[1];};
-const RING=[675,ligY(675)+14];
+const CANAL=[616,666]; // compartimento medial: ~largura da veia
+const RING=[641,ligY(641)+12];
 const SAPH=[628,1110];
 
 // ---------- camera ----------
-const CAM=[[0,1,540,950],[5.0,1,540,950],[8.8,1.34,660,905],[10.4,1.34,660,905],[13.2,1.3,652,985],[14.6,1.3,652,985],[16.2,1.4,664,962],[21.8,1.45,662,968],[23.8,1,540,950],[28,1,540,950]];
+const CAM=[[0,1,540,950],[2.7,1,540,950],[4.1,1.55,640,905],[5.6,1.58,640,905],[8.8,1.34,640,915],[10.4,1.34,640,915],[13.2,1.3,630,985],[14.6,1.3,630,985],[16.2,1.4,640,962],[21.8,1.45,640,968],[23.8,1,540,950],[28,1,540,950]];
 let CS=1,CF=[540,950];
 function camera(t){for(let i=1;i<CAM.length;i++){if(t<=CAM[i][0]){const a=CAM[i-1],b=CAM[i];const k=smooth(seg(t,a[0],b[0]));CS=lerp(a[1],b[1],k);CF=[lerp(a[2],b[2],k),lerp(a[3],b[3],k)];return;}}const l=CAM[CAM.length-1];CS=l[1];CF=[l[2],l[3]];}
 const camT=ctx=>ctx.setTransform(CS,0,0,CS,540-CF[0]*CS,950-CF[1]*CS);
@@ -126,10 +127,10 @@ function hernia(t){
   const inc=smooth(seg(t,14.6,19.2)), str=smooth(seg(t,19.2,22.2));
   const a=clamp(p/.55), b=clamp((p-.55)/.45);
   let cx,cy,r;
-  if(p<=.55){cx=675;cy=lerp(728,1092,ease(a));r=lerp(18,30,a);}
-  else{const e=ease(b);cx=lerp(675,648,e);cy=lerp(1092,1002,e);r=lerp(30,138,e);}
+  if(p<=.55){cx=RING[0];cy=lerp(728,1092,ease(a));r=lerp(14,26,a);}
+  else{const e=ease(b);cx=lerp(RING[0],628,e);cy=lerp(1092,1002,e);r=lerp(26,138,e);}
   r+=inc*16+str*6;
-  return{p,a,b,cx,cy,r,neck:lerp(30,22,inc),s:inc+str,inc,str};
+  return{p,a,b,cx,cy,r,neck:lerp(23,17,inc),s:inc+str,inc,str};
 }
 function sacOutline(h){
   const top=RING[1]-34,n=h.neck,R=h.r+14,rx=R*1.04,ry=R*.94;
@@ -256,19 +257,19 @@ function vessels(){
   tube(X,[[644,460],[602,640],[576,ligY(576)],[569,950],[566,1200],[560,1500]],42,PAL.vein,58);
 }
 function sheath(a){
-  const p=dense([[405,ligY(405)+4],[560,ligY(560)+4],[724,ligY(724)+4],[722,940],[642,1032],[520,1034],[420,1032],[410,900],[405,ligY(405)+4]]);
+  const p=dense([[405,ligY(405)+4],[560,ligY(560)+4],[CANAL[1]+2,ligY(CANAL[1])+4],[CANAL[1],880],[612,960],[560,1030],[420,1032],[410,900],[405,ligY(405)+4]]);
   X.save();X.globalAlpha=a;poly(X,J(p,60),true);
   X.fillStyle=RL?'rgba(210,220,255,.07)':'rgba(170,190,225,.18)';X.fill();
   X.strokeStyle=RL?'rgba(220,230,255,.5)':INK;X.lineWidth=RL?2.5:2.5;X.setLineDash([10,8]);X.stroke();X.setLineDash([]);
   X.strokeStyle=RL?'rgba(220,230,255,.32)':'rgba(43,29,27,.6)';X.lineWidth=2;
-  [[512,1028],[624,1004]].forEach(([x,y2],i)=>{poly(X,J(lpts([x,ligY(x)+6],[x-4,y2]),61+i));X.stroke();});
+  [[512,1028],[CANAL[0]-8,925]].forEach(([x,y2],i)=>{poly(X,J(lpts([x,ligY(x)+6],[x-4,y2]),61+i));X.stroke();});
   X.restore();
 }
 function cloquet(h){
   const a=1-clamp(h.p*3);if(a<=0)return;
   X.save();X.globalAlpha=a;
-  if(RL){X.beginPath();X.arc(678,900,30,0,7);X.fillStyle='rgba(230,200,120,.25)';X.fill();}
-  const p=[];for(let i=0;i<24;i++){const th=i/24*6.283;p.push([678+15*Math.cos(th),900+22*Math.sin(th)]);}
+  if(RL){X.beginPath();X.arc(RING[0],868,20,0,7);X.fillStyle='rgba(230,200,120,.25)';X.fill();}
+  const p=[];for(let i=0;i<24;i++){const th=i/24*6.283;p.push([RING[0]+10*Math.cos(th),868+14*Math.sin(th)]);}
   blob(X,p,RL?{d:'#4a6a3a',b:'#86a868',l:'#c4dca0'}:{sh:'#8fb478',b:'#b8d8a0'},70,{cel:4,lw:2.5});
   X.restore();
 }
@@ -290,11 +291,11 @@ function fascia(h){
 }
 function ligaments(hot){
   // lacunar ligament (medial border of the ring)
-  const lac=dense([[712,ligY(712)+8],[800,ligY(800)+6],[PT[0],PT[1]],[892,893],[800,894],[716,874],[708,850],[712,ligY(712)+8]]);
+  const L0=CANAL[1]+3;const lac=dense([[L0,ligY(L0)+8],[800,ligY(800)+6],[PT[0],PT[1]],[892,893],[780,894],[L0+6,878],[L0-2,850],[L0,ligY(L0)+8]]);
   const lc=RL?{d:mix('#9a8c72','#8a1a1a',hot),b:mix('#ddd4c0','#e04848',hot*.7),l:mix('#fffaf0','#ff9a9a',hot*.6)}:{sh:mix('#e1d5bb','#e06060',hot*.7),b:mix('#fffaf0','#ffb0a8',hot*.7)};
   blob(X,lac,lc,90,{cel:5,lw:3});
   X.save();poly(X,lac,true);X.clip();X.strokeStyle=RL?'rgba(120,100,80,.35)':'rgba(43,29,27,.35)';X.lineWidth=1.6;
-  for(let i=0;i<14;i++){X.beginPath();X.moveTo(716+i*14,ligY(716+i*14)+4);X.lineTo(714+i*13,895);X.stroke();}X.restore();
+  for(let i=0;i<17;i++){X.beginPath();X.moveTo(L0+4+i*14,ligY(L0+4+i*14)+4);X.lineTo(L0+2+i*13,895);X.stroke();}X.restore();
   // inguinal ligament
   const l=J(LIG,91,1.2);
   X.save();X.lineCap='round';X.lineJoin='round';
@@ -333,6 +334,35 @@ function constriction(t,h){
   arrowW(R0-70,Y+70,R0-26,Y+18,ca*seg(t,16.1,17),col,5);
 }
 
+// ---------- femoral canal emphasis ----------
+function canalPts(){const top=ligY(CANAL[0])+2,top2=ligY(CANAL[1])+2;
+  return dense([[CANAL[0],top],[CANAL[0]+1,850],[RING[0]-6,900],[RING[0],912],[RING[0]+8,900],[CANAL[1]-1,850],[CANAL[1],top2],[CANAL[0],top]]);}
+function canalShape(t,h){
+  const a=Math.max(seg(t,3.4,4.2)*(1-seg(t,10.6,11.4))*(h.p>.1?.6:1),0);if(a<=0)return;
+  const pul=.5+.5*Math.sin(t*4);const c=canalPts();
+  X.save();X.globalAlpha=a;
+  X.shadowColor='rgba(255,211,107,.9)';X.shadowBlur=18+pul*14;
+  poly(X,c,true);X.fillStyle=`rgba(255,211,107,${(h.p>.05?.08:.22)+pul*.08})`;X.fill();
+  X.lineWidth=3.5;X.strokeStyle='#ffd36b';X.setLineDash([10,7]);X.lineDashOffset=-t*30;X.stroke();X.restore();
+}
+function canalFocus(t){
+  const a=seg(t,3.6,4.3)*(1-seg(t,5.7,6.3));if(a<=0)return;
+  // spotlight: darken everything except the canal
+  const [cx,cy]=S(RING[0],870);
+  X.save();X.globalAlpha=a;const g=X.createRadialGradient(cx,cy,60,cx,cy,520);g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(1,'rgba(0,0,0,.6)');X.fillStyle=g;X.fillRect(0,0,W,H);X.restore();
+  // dimensions
+  const [x0,y0]=S(CANAL[0],ligY(CANAL[0])+2),[x1]=S(CANAL[1],0),[,yb]=S(0,912);
+  const da=a*seg(t,4.2,4.8);X.save();X.globalAlpha=da;X.strokeStyle='#fff';X.fillStyle='#fff';X.lineWidth=2.5;
+  const bx=x1+60;X.beginPath();X.moveTo(bx-10,y0);X.lineTo(bx+10,y0);X.moveTo(bx,y0);X.lineTo(bx,yb);X.moveTo(bx-10,yb);X.lineTo(bx+10,yb);X.stroke();
+  const by=y0-62;X.beginPath();X.moveTo(x0,by-10);X.lineTo(x0,by+10);X.moveTo(x0,by);X.lineTo(x1,by);X.moveTo(x1,by-10);X.lineTo(x1,by+10);X.stroke();
+  X.font=`800 30px ${SANS}`;X.textBaseline='middle';X.lineJoin='round';X.lineWidth=7;X.strokeStyle='rgba(8,6,12,.85)';
+  X.textAlign='left';X.strokeText('≈ 1,25 cm',bx+18,(y0+yb)/2);X.fillStyle='#ffd36b';X.fillText('≈ 1,25 cm',bx+18,(y0+yb)/2);
+  X.textAlign='center';X.strokeText('≈ 1 cm',(x0+x1)/2,by-30);X.fillText('≈ 1 cm',(x0+x1)/2,by-30);
+  X.restore();
+  label(RING[0]-6,885,410,1170,a*seg(t,3.9,4.5),{txt:'Canal femoral',align:'right',s:34,w:800,color:GOLD(),line:GOLD()});
+  label(568,1000,410,1250,a*seg(t,4.6,5.1),{txt:'Veia femoral (ao lado)',align:'right',s:26,w:700});
+}
+
 // ---------- labels ----------
 function label(ax,ay,tx,ty,a,o={}){
   if(a<=0)return;const [sx,sy]=o.screen?[ax,ay]:S(ax,ay);
@@ -355,7 +385,7 @@ const GOLD=()=>RL?'#ffd36b':'#b0400a';
 const RED=()=>RL?'#ff9a9a':'#b01c2a';
 
 function labels(t,h){
-  const a=seg(t,.9,1.7)*(1-seg(t,5,5.6)), a2=seg(t,1.6,2.4)*(1-seg(t,5,5.6));
+  const a=seg(t,.9,1.7)*(1-seg(t,2.6,3.1)), a2=seg(t,1.4,2.1)*(1-seg(t,2.6,3.1));
   label(ASIS[0],ASIS[1],110,555,a,{txt:'EIAS',align:'center',s:24,dy:-16});
   label(250,ligY(250),70,790,a,{txt:'Ligamento inguinal',s:26});
   label(PT[0],PT[1],1010,1020,a,{txt:'Tubérculo púbico',align:'right',s:25});
@@ -363,14 +393,12 @@ function labels(t,h){
   label(330,1100,300,1180,a2,{txt:'Nervo femoral',align:'right',s:25});
   label(446,1250,300,1265,a2,{txt:'Artéria femoral',align:'right',s:25});
   label(565,1330,300,1350,a2,{txt:'Veia femoral',align:'right',s:25});
-  label(678,905,790,1075,a2*seg(t,2,2.6),{txt:'Canal femoral',s:30,w:800,color:GOLD(),line:GOLD()});
-  label(680,1180,800,1200,a2,{txt:'Hiato safeno',s:24});
   label(735,1330,800,1320,a2,{txt:'V. safena magna',s:24});
   // ring highlight before the slide
-  const ra=seg(t,3.1,3.7)*(1-seg(t,7.2,7.8));
-  if(ra>0){X.save();camT(X);X.globalAlpha=ra;X.beginPath();X.ellipse(RING[0],RING[1]+2,42,14,0,0,7);
+  const ra=seg(t,4.4,4.9)*(1-seg(t,7.2,7.8));
+  if(ra>0){X.save();camT(X);X.globalAlpha=ra;X.beginPath();X.ellipse(RING[0],RING[1]+2,27,11,0,0,7);
     X.strokeStyle=GOLD();X.lineWidth=5;X.setLineDash([9,7]);X.lineDashOffset=-t*40;X.stroke();X.restore();X.setTransform(1,0,0,1,0,0);
-    label(RING[0]+30,RING[1]+8,800,700,ra,{txt:'Anel femoral',s:30,w:800,color:GOLD(),line:GOLD()});}
+    label(RING[0]+22,RING[1]+6,800,700,ra,{txt:'Anel femoral',s:30,w:800,color:GOLD(),line:GOLD()});}
   // pressure text
   const pa=fade(t,6.2,10.4,.6);
   if(pa>0){X.save();X.globalAlpha=pa;X.font=RL?`800 28px ${SANS}`:`italic 700 31px ${SERIF}`;X.fillStyle=RL?'#ffd36b':'#b0400a';X.textAlign='center';
@@ -380,7 +408,7 @@ function labels(t,h){
   const sacA=fade(t,7.6,14.6,.5);
   label(h.cx-h.r*.75-10,h.cy+h.r*.45,250,1080,fade(t,7.6,11.2,.5),{txt:'Saco herniário',align:'right',s:28,w:800,color:GOLD(),line:GOLD()});
   label(h.cx+h.r*.8,h.cy-h.r*.55,1010,1140,fade(t,11,14.6,.5),{txt:'Saco herniário',align:'right',s:28,w:800,color:GOLD(),line:GOLD(),dy:-22});
-  label(678,880,250,880,fade(t,6.6,10.6,.5),{txt:'Canal femoral',align:'right',s:25,w:700});
+  label(RING[0]-20,880,250,880,fade(t,6.6,10.6,.5),{txt:'Canal femoral',align:'right',s:26,w:800,color:GOLD(),line:GOLD()});
   const bl=bowelPath(h).loop;const q=bl[Math.floor(bl.length*.72)];
   label(q[0],q[1],1010,1240,fade(t,11.8,14.6,.5),{txt:'Alça de intestino delgado',align:'right',s:25,dy:-22});
   const m=[lerp(h.cx,q[0],.3),lerp(h.cy,q[1],.3)];
@@ -476,10 +504,10 @@ function skinLabels(t,h){
 
 // ---------- captions / title / finishing ----------
 const CAPS=[
-  [0.5,5.6,'ANATOMIA','O **canal femoral** é o compartimento mais medial da bainha femoral: **medial à veia**, abaixo do ligamento inguinal.'],
+  [0.5,5.6,'ANATOMIA','O **canal femoral** é o compartimento mais medial da bainha femoral: curto (**≈ 1,25 cm**) e estreito — o anel mal admite a **ponta do dedo mínimo**.'],
   [5.6,10.2,'1 · DESLIZAMENTO','Com a **pressão intra-abdominal**, o saco peritoneal com uma alça de delgado entra pelo **anel femoral** e desliza pelo canal.'],
-  [10.2,14.6,'2 · EXTERIORIZAÇÃO','Sai pelo **hiato safeno** e, no tecido frouxo da coxa, dobra **para frente e para cima** — trajeto em "J".'],
-  [14.6,19.2,'3 · ENCARCERAMENTO','O anel é **estreito e inextensível**: a alça não volta. O retorno venoso trava → **edema e congestão**.'],
+  [10.2,14.6,'2 · EXTERIORIZAÇÃO','Ao deixar o **canal femoral**, o saco encontra o tecido frouxo da coxa e dobra **para frente e para cima** — trajeto em "J".'],
+  [14.6,19.2,'3 · ENCARCERAMENTO','O canal é **estreito e inextensível**: a alça não volta. O retorno venoso trava → **edema e congestão**.'],
   [19.2,22.6,'4 · ESTRANGULAMENTO','O edema bloqueia a irrigação arterial → **isquemia e necrose**. Cuidado com a hérnia de **Richter**.'],
   [22.6,28,'5 · NA PELE','**Abaulamento abaixo do ligamento inguinal**, inferolateral ao tubérculo púbico. Tenso, doloroso, irredutível = **cirurgia de urgência**.'],
 ];
@@ -541,6 +569,7 @@ function draw(t){
   const hot=seg(t,14.8,16)*(.55+.45*Math.sin(t*7))*(1-seg(t,22,22.6));
   ligaments(hot);
   if(h.b>0){X.save();X.beginPath();X.ellipse(h.cx,h.cy,(h.r+20)*1.05,(h.r+20)*.95,0,0,7);X.clip();X.setTransform(1,0,0,1,0,0);X.globalAlpha=ia*clamp(h.b*4);X.drawImage(off,0,0);X.restore();camT(X);}
+  canalShape(t,h);
   pressure(t);constriction(t,h);
   skin(t,h);
   X.setTransform(1,0,0,1,0,0);
@@ -549,7 +578,7 @@ function draw(t){
   if(!RL){X.save();roundRect(X,40,450,1000,1000,14);X.strokeStyle=INK;X.lineWidth=4;X.stroke();X.restore();}
   else{X.save();roundRect(X,40,450,1000,1000,36);X.strokeStyle='rgba(255,255,255,.08)';X.lineWidth=2;X.stroke();X.restore();}
   X.save();roundRect(X,40,450,1000,1000,RL?36:14);X.clip();
-  orientation(seg(t,.9,1.7)*(1-seg(t,5,5.6)));
+  orientation(seg(t,.9,1.7)*(1-seg(t,2.6,3.1)));canalFocus(t);
   labels(t,h);inset(t);skinLabels(t,h);
   X.restore();
   title(t);captions(t);
