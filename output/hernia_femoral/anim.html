@@ -10,7 +10,7 @@ const Q = new URLSearchParams(location.search);
 const STYLE = Q.get('style') || 'real';
 const RL = STYLE === 'real';
 const C = document.getElementById('c'), X = C.getContext('2d');
-const W = 1080, H = 1920, DUR = 28;
+const W = 1080, H = 1920, INTRO = 4.4, DUR = 28 + INTRO;
 const off = document.createElement('canvas'); off.width = W; off.height = H;
 const O = off.getContext('2d');
 const SANS = 'Inter, "DejaVu Sans", sans-serif';
@@ -542,14 +542,15 @@ function title(t){
     X.strokeStyle=INK;X.lineWidth=2;X.beginPath();X.moveTo(340,348);X.lineTo(740,348);X.stroke();}
   X.restore();
   X.fillStyle=RL?'rgba(255,255,255,.12)':'rgba(43,29,27,.15)';roundRect(X,120,1758,840,6,3);X.fill();
-  X.fillStyle=RL?'rgba(255,255,255,.75)':INK;roundRect(X,120,1758,Math.max(6,840*clamp(t/DUR)),6,3);X.fill();
+  X.fillStyle=RL?'rgba(255,255,255,.75)':INK;roundRect(X,120,1758,Math.max(6,840*clamp(TG/DUR)),6,3);X.fill();
 }
 function orientation(a){
   if(a<=0)return;X.save();X.globalAlpha=a*.75;X.font=RL?`700 20px ${SANS}`:`italic 22px ${SERIF}`;X.fillStyle=RL?'#fff':INK;
   X.fillText('LATERAL',72,494);X.textAlign='right';X.fillText('MEDIAL',1008,494);X.restore();
 }
 
-function draw(t){
+let TG=0;
+function drawCore(t){
   BS=Math.floor(t*8);
   camera(t);
   const h=hernia(t);
@@ -560,7 +561,7 @@ function draw(t){
   // diagram panel
   X.save();roundRect(X,40,450,1000,1000,RL?36:14);X.clip();
   camT(X);
-  const ia=ease(seg(t,.1,1.1));X.globalAlpha=ia;
+  const ia=1;X.globalAlpha=ia;
   panelBase();abdomen();muscles();bone();vessels();
   sheath(1-seg(t,10,11)*.55);cloquet(h);
   drawHernia(O,h,t);
@@ -581,10 +582,52 @@ function draw(t){
   orientation(seg(t,.9,1.7)*(1-seg(t,2.6,3.1)));canalFocus(t);
   labels(t,h);inset(t);skinLabels(t,h);
   X.restore();
-  title(t);captions(t);
+  introOverlay(TG);
+  title(TG);captions(t);introCaption(TG);
   X.save();X.globalAlpha=.5;X.font=RL?`500 19px ${SANS}`:`italic 21px ${SERIF}`;X.fillStyle=RL?'#fff':INK;X.textAlign='center';X.fillText('ilustração esquemática · conteúdo educativo',W/2,1812);X.restore();
   if(RL){X.save();X.globalCompositeOperation='overlay';X.globalAlpha=.07;X.drawImage(GRAIN[Math.floor(t*24)%4],0,0,W,H);X.restore();}
 }
+// ---------- opening: healthy skin, surface landmarks, then the skin opens ----------
+function introOverlay(t){
+  const reveal=seg(t,INTRO-1.1,INTRO+.7); if(reveal>=1) return;
+  const [cx,cy]=[RING[0],RING[1]+40];
+  const rad=ease(reveal)*1500;
+  X.save();roundRect(X,40,450,1000,1000,36);X.clip();
+  if(rad>0){X.beginPath();X.rect(0,0,W,H);X.moveTo(cx+rad,cy);X.arc(cx,cy,rad,0,Math.PI*2);X.closePath();X.clip('evenodd');}
+  X.globalAlpha=1;
+  const g=X.createLinearGradient(0,450,0,1450);g.addColorStop(0,'#d2a084');g.addColorStop(1,'#b8805e');X.fillStyle=g;X.fillRect(0,0,W,H);
+  const g2=X.createRadialGradient(540,900,200,540,950,800);g2.addColorStop(0,'rgba(0,0,0,0)');g2.addColorStop(1,'rgba(40,15,8,.45)');X.fillStyle=g2;X.fillRect(0,0,W,H);
+  X.filter='blur(7px)';X.strokeStyle='rgba(90,40,25,.55)';X.lineWidth=16;X.lineCap='round';poly(X,LIG.map(p=>[p[0],p[1]+38]));X.stroke();
+  X.strokeStyle='rgba(255,220,200,.25)';X.lineWidth=10;poly(X,LIG.map(p=>[p[0],p[1]+56]));X.stroke();X.filter='none';
+  X.globalCompositeOperation='overlay';X.globalAlpha*=.15;X.drawImage(GRAIN[1],-60,0,1200,2130);X.globalCompositeOperation='source-over';
+  X.globalAlpha=1;
+  // edge of the opening
+  if(rad>0){X.beginPath();X.arc(cx,cy,rad,0,7);X.strokeStyle='rgba(120,30,30,.8)';X.lineWidth=10;X.filter='blur(4px)';X.stroke();X.filter='none';}
+  // landmarks
+  const la=seg(t,.6,1.3)*(1-seg(t,INTRO-1.2,INTRO-.8));
+  X.save();X.globalAlpha=la;X.setLineDash([14,10]);X.strokeStyle='rgba(255,255,255,.9)';X.lineWidth=3.5;poly(X,LIG);X.stroke();X.setLineDash([]);
+  [ASIS,PT].forEach(p=>{X.beginPath();X.arc(p[0],p[1],10,0,7);X.fillStyle='#fff';X.fill();});
+  // where the canal is
+  const ca=seg(t,1.4,2)*(1-seg(t,INTRO-1.2,INTRO-.8)),pul=.5+.5*Math.sin(t*5);
+  X.globalAlpha=ca;X.beginPath();X.ellipse(RING[0],RING[1]+30,26+pul*6,40+pul*6,0,0,7);X.strokeStyle='#ffd36b';X.lineWidth=4;X.setLineDash([9,7]);X.lineDashOffset=-t*30;X.stroke();
+  X.restore();
+  X.restore();
+  const la2=seg(t,.6,1.3)*(1-seg(t,INTRO-1.2,INTRO-.8));
+  label(ASIS[0],ASIS[1],110,555,la2,{screen:true,txt:'EIAS',align:'center',s:25,dy:-16});
+  label(330,ligY(330),70,560,la2,{screen:true,txt:'Ligamento inguinal',s:26,dy:40});
+  label(PT[0],PT[1],1010,780,la2,{screen:true,txt:'Tubérculo púbico',align:'right',s:26});
+  label(RING[0]+20,RING[1]+40,1010,1180,seg(t,1.4,2)*(1-seg(t,INTRO-1.2,INTRO-.8)),{screen:true,txt:'Canal femoral (sob a pele)',align:'right',s:28,w:800,color:'#ffd36b',line:'#ffd36b',dy:-24});
+}
+function introCaption(t){
+  const al=fade(t,.3,INTRO+.3,.4);if(al<=0)return;
+  X.save();X.globalAlpha=al;
+  roundRect(X,56,1484,968,232,30);X.fillStyle='rgba(255,255,255,.06)';X.fill();X.strokeStyle='rgba(255,255,255,.12)';X.lineWidth=2;X.stroke();
+  X.font=`800 24px ${SANS}`;X.textBaseline='alphabetic';const tag='NA PELE';const tw=X.measureText(tag).width+34;
+  roundRect(X,88,1508,tw,42,21);X.fillStyle='#8a5426';X.fill();X.fillStyle='#fff';X.fillText(tag,105,1537);
+  richText('Referências: **EIAS**, **ligamento inguinal** e **tubérculo púbico**. O canal femoral fica logo **abaixo do ligamento**, lateral ao tubérculo.',90,1598,895,33,45);
+  X.restore();
+}
+function draw(t){TG=t;drawCore(Math.max(0,t-INTRO));}
 window.draw=draw;window.DUR=DUR;
 if(!Q.has('render')){const s0=performance.now();const loop=()=>{draw(((performance.now()-s0)/1000)%DUR);requestAnimationFrame(loop);};loop();}
 </script></body></html>
