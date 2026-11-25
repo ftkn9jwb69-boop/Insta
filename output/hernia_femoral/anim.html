@@ -1,0 +1,561 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#000}canvas{display:block}</style>
+</head><body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+// Hérnia femoral — deslizamento pelo canal e encarceramento.
+// ?style=real  (atlas realista)   ?style=desenho  (ilustração em nanquim)
+const Q = new URLSearchParams(location.search);
+const STYLE = Q.get('style') || 'real';
+const RL = STYLE === 'real';
+const C = document.getElementById('c'), X = C.getContext('2d');
+const W = 1080, H = 1920, DUR = 28;
+const off = document.createElement('canvas'); off.width = W; off.height = H;
+const O = off.getContext('2d');
+const SANS = 'Inter, "DejaVu Sans", sans-serif';
+const SERIF = '"Bitstream Charter", Caladea, "DejaVu Serif", serif';
+const INK = '#2b1d1b';
+
+const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+const seg=(t,a,b)=>clamp((t-a)/(b-a));
+const ease=x=>x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;
+const smooth=x=>x*x*(3-2*x);
+const lerp=(a,b,k)=>a+(b-a)*k;
+const hex=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const mix=(a,b,k)=>{const A=hex(a),B=hex(b);return '#'+A.map((v,i)=>Math.round(lerp(v,B[i],clamp(k))).toString(16).padStart(2,'0')).join('');};
+const mix3=(a,b,c,s)=>s<=1?mix(a,b,s):mix(b,c,s-1);
+const fade=(t,a,b,f=.4)=>Math.min(seg(t,a,a+f),1-seg(t,b-f,b));
+const rnd=i=>{const x=Math.sin(i*127.1+311.7)*43758.5453;return x-Math.floor(x);};
+
+// ---------- textures ----------
+function noiseCanvas(seed,w,h,fn){const c=document.createElement('canvas');c.width=w;c.height=h;const g=c.getContext('2d');const d=g.createImageData(w,h);
+  let s=seed;const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  for(let i=0;i<w*h;i++){const v=fn(r);d.data[i*4]=v[0];d.data[i*4+1]=v[1];d.data[i*4+2]=v[2];d.data[i*4+3]=v[3];}
+  g.putImageData(d,0,0);return c;}
+const GRAIN=[1,2,3,4].map(k=>noiseCanvas(k*999,540,960,r=>{const v=r()*255;return [v,v,v,255];}));
+const PAPER=(()=>{const c=noiseCanvas(77,540,960,r=>{const v=225+r()*30;return [v,v-4,v-14,255];});
+  const g=c.getContext('2d');let s=5;const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  g.globalAlpha=.08;g.strokeStyle='#8a6a40';for(let i=0;i<400;i++){const x=r()*540,y=r()*960,a=r()*6.28,l=4+r()*14;g.lineWidth=.6;g.beginPath();g.moveTo(x,y);g.lineTo(x+Math.cos(a)*l,y+Math.sin(a)*l);g.stroke();}
+  return c;})();
+
+// ---------- geometry helpers ----------
+function qpts(a,c,b,n=24){const r=[];for(let i=0;i<=n;i++){const u=i/n,v=1-u;r.push([v*v*a[0]+2*v*u*c[0]+u*u*b[0],v*v*a[1]+2*v*u*c[1]+u*u*b[1]]);}return r;}
+function lpts(a,b){const n=Math.max(2,Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/14));const r=[];for(let i=0;i<=n;i++)r.push([lerp(a[0],b[0],i/n),lerp(a[1],b[1],i/n)]);return r;}
+function dense(cp){ // quadratic-midpoint smoothing of control points
+  if(cp.length<3) return lpts(cp[0],cp[1]);
+  let r=[cp[0]];let prev=cp[0];
+  for(let i=1;i<cp.length-1;i++){const m=i<cp.length-2?[(cp[i][0]+cp[i+1][0])/2,(cp[i][1]+cp[i+1][1])/2]:cp[i+1];
+    const n=Math.max(4,Math.ceil(Math.hypot(m[0]-prev[0],m[1]-prev[1])/12));r=r.concat(qpts(prev,cp[i],m,n).slice(1));prev=m;}
+  return r;}
+let BS=0; // line-boil seed for the hand-drawn style
+function J(pts,id,amt=1.5){if(RL)return pts;return pts.map((p,i)=>[p[0]+(rnd(i*3.13+id*17.7+BS*91.1)-.5)*amt*2,p[1]+(rnd(i*7.31+id*13.3+BS*57.7)-.5)*amt*2]);}
+function poly(ctx,pts,closed){ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i][0],pts[i][1]);if(closed)ctx.closePath();}
+function roundRect(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+
+// cylindrical structure (vessel, nerve, bowel)
+function tube(ctx,cp,w,col,id,isDense){
+  const pts=J(isDense?cp:dense(cp),id,1.3);
+  ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
+  if(RL){
+    ctx.save();ctx.shadowColor='rgba(0,0,0,.55)';ctx.shadowBlur=w*.6;ctx.shadowOffsetX=w*.15;ctx.shadowOffsetY=w*.25;
+    poly(ctx,pts);ctx.strokeStyle=col.d;ctx.lineWidth=w;ctx.stroke();ctx.restore();
+    const L=[[.8,col.b,.06],[.52,col.l,.14],[.14,col.s,.25]];
+    for(const [k,c,o] of L){ctx.save();ctx.translate(-w*o,-w*o);poly(ctx,pts);ctx.strokeStyle=c;ctx.lineWidth=w*k;if(k<.2)ctx.globalAlpha=.75;ctx.stroke();ctx.restore();}
+  }else{
+    poly(ctx,pts);ctx.strokeStyle=INK;ctx.lineWidth=w+6;ctx.stroke();
+    poly(ctx,pts);ctx.strokeStyle=col.sh;ctx.lineWidth=w;ctx.stroke();
+    ctx.save();ctx.translate(-w*.15,-w*.15);poly(ctx,pts);ctx.strokeStyle=col.b;ctx.lineWidth=w*.66;ctx.stroke();ctx.restore();
+    ctx.save();ctx.translate(-w*.24,-w*.24);poly(ctx,pts);ctx.strokeStyle='rgba(255,255,255,.75)';ctx.lineWidth=Math.max(2,w*.1);ctx.setLineDash([w*1.4,w*.9]);ctx.stroke();ctx.restore();
+  }
+  ctx.restore();
+}
+// closed volume (bone, ligament, sac…)
+function blob(ctx,pts,col,id,o={}){
+  pts=J(pts,id,1.4);
+  ctx.save();
+  if(RL){
+    poly(ctx,pts,true);
+    const b=bbox(pts);const g=ctx.createRadialGradient(b.x+b.w*.32,b.y+b.h*.28,2,b.x+b.w*.5,b.y+b.h*.5,Math.max(b.w,b.h)*.75);
+    g.addColorStop(0,col.l);g.addColorStop(.55,col.b);g.addColorStop(1,col.d);
+    if(o.shadow){ctx.save();ctx.shadowColor='rgba(0,0,0,.5)';ctx.shadowBlur=24;ctx.shadowOffsetY=10;ctx.fillStyle=g;ctx.fill();ctx.restore();}
+    else{ctx.fillStyle=g;ctx.fill();}
+    if(o.rim){ctx.strokeStyle=o.rim;ctx.lineWidth=2;ctx.stroke();}
+  }else{
+    poly(ctx,pts,true);ctx.fillStyle=col.sh;ctx.fill();
+    ctx.save();ctx.clip();const k=o.cel||8;ctx.translate(-k,-k);poly(ctx,pts,true);ctx.fillStyle=col.b;ctx.fill();ctx.restore();
+    poly(ctx,pts,true);ctx.strokeStyle=INK;ctx.lineWidth=o.lw||3.5;ctx.lineJoin='round';ctx.stroke();
+  }
+  ctx.restore();
+}
+function bbox(p){let a=1e9,b=1e9,c=-1e9,d=-1e9;for(const q of p){a=Math.min(a,q[0]);b=Math.min(b,q[1]);c=Math.max(c,q[0]);d=Math.max(d,q[1]);}return{x:a,y:b,w:c-a,h:d-b};}
+
+// ---------- palettes ----------
+const PAL = RL ? {
+  art:{d:'#4a070d',b:'#a51c26',l:'#d9474c',s:'#ffd0d0'},
+  vein:{d:'#0b1a40',b:'#244896',l:'#5079cc',s:'#d8e4ff'},
+  nerve:{d:'#6a5414',b:'#c9a52f',l:'#ecd170',s:'#fffbe0'},
+  bowelBg:{d:'#5c2427',b:'#9c4e4e',l:'#c27670',s:'#f0c8c0'},
+  bone:{d:'#9b8762',b:'#d9cba6',l:'#f6eedb'},
+  lig:{d:'#a89a80',b:'#e7dfcd',l:'#fffaf0'},
+  b0:['#7e3036','#cf7c73','#efb1a5','#fff0ea'], b1:['#4e0b1a','#9c2238','#cc4658','#ffb0b8'], b2:['#12050d','#33122a','#56264a','#9a6a8c'],
+} : {
+  art:{sh:'#c23a3e',b:'#ec6a62'}, vein:{sh:'#33609e',b:'#6b9ade'}, nerve:{sh:'#d3a92a',b:'#f7da5f'},
+  bowelBg:{sh:'#d99a8e',b:'#f3c3b6'},
+  bone:{sh:'#dcc9a0',b:'#f7ecd2'}, lig:{sh:'#e3d8c0',b:'#fffaf0'},
+  b0:['#d98a80','#f8b8ac'], b1:['#ad2c43','#da566c'], b2:['#3c1530','#6a2c56'],
+};
+
+// ---------- anatomy (world coords) ----------
+const ASIS=[140,640], PT=[900,880];
+const LIG=qpts(ASIS,[520,ASIS[1]+(520-140)*240/760+42],PT,60);
+const ligY=x=>{for(let i=1;i<LIG.length;i++){if(LIG[i][0]>=x){const a=LIG[i-1],b=LIG[i];return lerp(a[1],b[1],(x-a[0])/(b[0]-a[0]));}}return PT[1];};
+const RING=[675,ligY(675)+14];
+const SAPH=[628,1110];
+
+// ---------- camera ----------
+const CAM=[[0,1,540,950],[5.0,1,540,950],[8.8,1.34,660,905],[10.4,1.34,660,905],[13.2,1.3,652,985],[14.6,1.3,652,985],[16.2,1.4,664,962],[21.8,1.45,662,968],[23.8,1,540,950],[28,1,540,950]];
+let CS=1,CF=[540,950];
+function camera(t){for(let i=1;i<CAM.length;i++){if(t<=CAM[i][0]){const a=CAM[i-1],b=CAM[i];const k=smooth(seg(t,a[0],b[0]));CS=lerp(a[1],b[1],k);CF=[lerp(a[2],b[2],k),lerp(a[3],b[3],k)];return;}}const l=CAM[CAM.length-1];CS=l[1];CF=[l[2],l[3]];}
+const camT=ctx=>ctx.setTransform(CS,0,0,CS,540-CF[0]*CS,950-CF[1]*CS);
+const S=(x,y)=>[(x-CF[0])*CS+540,(y-CF[1])*CS+950];
+
+// ---------- hernia state ----------
+function hernia(t){
+  const p=ease(seg(t,5.8,14.4));
+  const inc=smooth(seg(t,14.6,19.2)), str=smooth(seg(t,19.2,22.2));
+  const a=clamp(p/.55), b=clamp((p-.55)/.45);
+  let cx,cy,r;
+  if(p<=.55){cx=675;cy=lerp(728,1092,ease(a));r=lerp(18,30,a);}
+  else{const e=ease(b);cx=lerp(675,648,e);cy=lerp(1092,1002,e);r=lerp(30,138,e);}
+  r+=inc*16+str*6;
+  return{p,a,b,cx,cy,r,neck:lerp(30,22,inc),s:inc+str,inc,str};
+}
+function sacOutline(h){
+  const top=RING[1]-34,n=h.neck,R=h.r+14,rx=R*1.04,ry=R*.94;
+  const a0=Math.PI+.62,a1=-.62;
+  const L=[h.cx+rx*Math.cos(a0),h.cy+ry*Math.sin(a0)],Rt=[h.cx+rx*Math.cos(a1),h.cy+ry*Math.sin(a1)];
+  let pts=qpts([RING[0]-n,top],[RING[0]-n,lerp(top,L[1],.75)],L,16);
+  const N=40;
+  // angles a0 (≈216°) → going through 90° (bottom) → a1 (≈-36°): decreasing
+  const arcPts=[];for(let i=1;i<N;i++){const th=a0-(a0-a1)*(i/N);arcPts.push([h.cx+rx*Math.cos(th),h.cy+ry*Math.sin(th)]);}
+  pts=pts.concat(arcPts);
+  pts=pts.concat(qpts(Rt,[RING[0]+n,lerp(top,Rt[1],.75)],[RING[0]+n,top],16));
+  return pts;
+}
+function bowelPath(h){
+  const top=RING[1]-34,off=Math.min(h.neck*.45,12);
+  const rr=Math.max(h.r*.58,off+4);
+  const d=Math.asin(clamp(off/rr,0,.95));
+  let p=dense([[430,648],[600,650],[RING[0]-off,top-40],[RING[0]-off,top]]);
+  const entryY=h.cy-rr*Math.cos(d);
+  p=p.concat(lpts([RING[0]-off,top],[h.cx-off,entryY]).slice(1));
+  const a0=-Math.PI/2-d, a1=-Math.PI/2+d-2*Math.PI, N=70, loop=[];
+  for(let i=0;i<=N;i++){const th=lerp(a0,a1,i/N);const w=1+.09*Math.sin(3*th+.8)*clamp((h.r-40)/60);
+    loop.push([h.cx+rr*w*Math.cos(th)*1.04,h.cy+rr*w*Math.sin(th)*.94]);}
+  p=p.concat(loop);
+  p=p.concat(lpts([h.cx+off,entryY],[RING[0]+off,top]).slice(1));
+  p=p.concat(dense([[RING[0]+off,top],[RING[0]+off,top-40],[760,650],[920,640]]).slice(1));
+  return{p,loop,rr,off};
+}
+function bowelCol(s){const B=PAL;const k=i=>mix3(B.b0[i],B.b1[i],B.b2[i],s);return RL?{d:k(0),b:k(1),l:k(2),s:k(3)}:{sh:k(0),b:k(1)};}
+
+function drawHernia(ctx,h,t){
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
+  if(h.p<=.001) return;
+  camT(ctx);
+  const sacA=clamp(h.p*6), sac=sacOutline(h);
+  // sac membrane
+  ctx.save();ctx.globalAlpha=sacA;
+  const fluid=h.inc;
+  if(RL){
+    poly(ctx,sac,true);const g=ctx.createRadialGradient(h.cx-h.r*.3,h.cy-h.r*.3,5,h.cx,h.cy,h.r+20);
+    g.addColorStop(0,'rgba(215,225,245,.30)');g.addColorStop(1,'rgba(150,165,200,.42)');
+    ctx.fillStyle=g;ctx.fill();
+    if(fluid>0){ctx.globalAlpha=sacA*fluid*.55;ctx.fillStyle=mix('#c9a24a','#6a1424',h.str);ctx.fill();}
+  }else{
+    poly(ctx,J(sac,301,1.4),true);ctx.fillStyle=mix(mix('#dfe9f6','#f3e3b0',fluid*.7),'#d9a0a8',h.str);ctx.fill();
+  }
+  ctx.restore();
+  // mesentery + bowel
+  const B=bowelPath(h);
+  ctx.save();ctx.globalAlpha=sacA;
+  if(h.r>38){
+    const mes=[[RING[0]-B.off*.6,RING[1]-30]].concat(B.loop.filter((_,i)=>i%2==0).map(q=>[lerp(h.cx,q[0],.86),lerp(h.cy,q[1],.86)])).concat([[RING[0]+B.off*.6,RING[1]-30]]);
+    const ma=clamp((h.r-38)/40);ctx.globalAlpha=sacA*ma;
+    if(RL){poly(ctx,mes,true);const g=ctx.createRadialGradient(h.cx-20,h.cy-30,5,h.cx,h.cy,h.r);g.addColorStop(0,mix('#f2d78a','#7a3a40',h.s*.5));g.addColorStop(1,mix('#b88f3e','#3a1420',h.s*.5));ctx.fillStyle=g;ctx.fill();
+      // fat lobules
+      for(let i=0;i<14;i++){const a=rnd(i*5.1)*6.28,rad=rnd(i*2.7)*B.rr*.6;ctx.beginPath();ctx.arc(h.cx+Math.cos(a)*rad,h.cy+Math.sin(a)*rad,6+rnd(i)*7,0,7);ctx.fillStyle=`rgba(255,240,190,${.18*(1-h.s*.4)})`;ctx.fill();}
+    }else{blob(ctx,mes,{sh:mix('#ecc66a','#a2607a',h.s*.5),b:mix('#fbe39a','#c7849a',h.s*.5)},401,{cel:6,lw:2.5});}
+    // vascular arcades
+    const vcol=h.inc>.05?mix('#c8303e','#4a5fb0',h.inc):(RL?'#c8303e':'#c23a3e');
+    ctx.strokeStyle=vcol;ctx.lineWidth=RL?3:3.2;ctx.lineCap='round';ctx.globalAlpha=sacA*ma*(1-h.str*.8);
+    for(let k=4;k<B.loop.length-4;k+=7){const q=B.loop[k];const m=[lerp(h.cx,q[0],.82),lerp(h.cy,q[1],.82)];
+      const pp=J(qpts([RING[0],RING[1]-20],[lerp(RING[0],m[0],.5)+(k%2?14:-14),lerp(RING[1],m[1],.6)],m,10),500+k,1);poly(ctx,pp);ctx.stroke();}
+  }
+  ctx.restore();
+  ctx.save();ctx.globalAlpha=sacA>0?1:0;
+  const bw=lerp(17,24,clamp(h.b*2))+h.inc*10+h.str*2;
+  tube(ctx,B.p,bw,bowelCol(h.s),600,true);
+  // petechiae / necrotic patches
+  if(h.inc>.3){ctx.globalAlpha=clamp((h.inc-.3)*1.5)*(RL?.7:.9);ctx.fillStyle=h.str>.4?'#0d0409':'#6a0a1c';
+    for(let i=0;i<B.loop.length;i+=5){const q=B.loop[i];const sz=bw*(.08+.12*rnd(i)+h.str*.18);ctx.beginPath();ctx.ellipse(q[0]+(rnd(i+3)-.5)*bw*.4,q[1]+(rnd(i+9)-.5)*bw*.4,sz,sz*.7,i,0,7);ctx.fill();}}
+  ctx.restore();
+  // sac rim on top (glossy membrane / ink)
+  ctx.save();ctx.globalAlpha=sacA;
+  if(RL){poly(ctx,sac,true);ctx.strokeStyle=mix('#d8e2f2','#ff6a78',h.inc*.6);ctx.lineWidth=3;ctx.stroke();
+    ctx.save();poly(ctx,sac,true);ctx.clip();ctx.globalAlpha=sacA*.35;const g=ctx.createLinearGradient(h.cx-h.r,h.cy-h.r,h.cx,h.cy);g.addColorStop(0,'rgba(255,255,255,.7)');g.addColorStop(.4,'rgba(255,255,255,0)');ctx.fillStyle=g;ctx.fillRect(h.cx-h.r-30,h.cy-h.r-30,2*h.r+60,2*h.r+60);ctx.restore();
+  }else{poly(ctx,J(sac,301,1.4),true);ctx.strokeStyle=INK;ctx.lineWidth=3.5;ctx.stroke();
+    // membrane hatch on lower-right
+    ctx.save();poly(ctx,J(sac,301,1.4),true);ctx.clip();ctx.strokeStyle='rgba(43,29,27,.28)';ctx.lineWidth=1.6;
+    for(let i=-40;i<30;i++){const x=h.cx+i*9;ctx.beginPath();ctx.moveTo(x,h.cy+h.r*.35);ctx.lineTo(x+h.r*.6,h.cy+h.r*1.35);ctx.stroke();}ctx.restore();}
+  ctx.restore();
+  ctx.setTransform(1,0,0,1,0,0);
+}
+
+// ---------- scene layers ----------
+function panelBase(){
+  if(RL){
+    const pg=X.createRadialGradient(560,820,80,560,950,760);pg.addColorStop(0,'#3a1a1e');pg.addColorStop(1,'#120709');X.fillStyle=pg;X.fillRect(-500,0,2200,2400);
+  }else{X.fillStyle='#f4e7d4';X.fillRect(-500,0,2200,2400);}
+}
+function abdomen(){
+  // region above the ligament (preperitoneal / peritoneal cavity)
+  X.save();poly(X,[[-200,300],[1300,300],[1300,ligY(1040)],[1040,ligY(1040)]].concat(LIG.slice().reverse()).concat([[ASIS[0],ASIS[1]],[-200,ASIS[1]]]),true);
+  X.fillStyle=RL?'rgba(70,18,30,.75)':'rgba(240,196,190,.75)';X.fill();X.clip();
+  if(RL)X.filter='blur(1.6px)';
+  X.globalAlpha=RL?.55:.7;
+  [[[200,560],[300,500],[400,580],[500,520],[560,575]],[[760,520],[880,470],[990,555],[900,615]],[[240,650],[330,600],[410,655]],[[600,520],[680,470],[740,510]]].forEach((l,i)=>tube(X,l,32,PAL.bowelBg,20+i));
+  X.filter='none';X.restore();
+}
+function muscles(){
+  const m=(poly0,slope,col,id)=>{X.save();poly(X,J(poly0,id,1.2),true);
+    if(RL){const g=X.createLinearGradient(poly0[0][0],poly0[0][1],poly0[2][0],poly0[2][1]);g.addColorStop(0,col[0]);g.addColorStop(1,col[1]);X.fillStyle=g;X.fill();X.clip();
+      X.strokeStyle='rgba(255,160,150,.10)';X.lineWidth=3;for(let i=-800;i<1600;i+=11){X.beginPath();X.moveTo(i,700);X.lineTo(i+slope*800,1500);X.stroke();}
+      X.strokeStyle='rgba(0,0,0,.22)';X.lineWidth=1.5;for(let i=-800;i<1600;i+=11){X.beginPath();X.moveTo(i+5,700);X.lineTo(i+5+slope*800,1500);X.stroke();}}
+    else{X.fillStyle=col[2];X.fill();X.clip();X.strokeStyle='rgba(43,29,27,.35)';X.lineWidth=1.8;for(let i=-800;i<1600;i+=22){X.beginPath();X.moveTo(i,700);X.lineTo(i+slope*800,1500);X.stroke();}
+      X.restore();X.save();poly(X,J(poly0,id,1.2),true);X.strokeStyle=INK;X.lineWidth=3;X.stroke();}
+    X.restore();};
+  m([[60,ligY(140)+20],[420,ligY(420)],[400,1500],[40,1500]],-.25,['#7a2a2a','#4a1416','#e0998a'],31); // iliopsoas
+  m([[600,960],[1060,930],[1000,1500],[560,1500]],.35,['#6a2224','#3e1012','#d98d80'],32); // pectineus / adductors
+}
+function bone(){
+  const p=dense([[450,925],[600,898],[800,892],[900,886],[1060,850],[1060,975],[900,972],[700,982],[455,980],[450,925]]);
+  blob(X,p,PAL.bone,40,{cel:7});
+  // pectineal (Cooper's) ligament
+  const c=dense([[470,918],[620,897],[800,892],[895,886]]);
+  if(RL){X.save();X.lineCap='round';poly(X,c);X.strokeStyle='#b8ab90';X.lineWidth=12;X.stroke();poly(X,c);X.strokeStyle='#fbf6ea';X.lineWidth=7;X.stroke();X.restore();}
+  else{X.save();X.lineCap='round';poly(X,J(c,41));X.strokeStyle=INK;X.lineWidth=12;X.stroke();poly(X,J(c,41));X.strokeStyle='#fffaf0';X.lineWidth=6;X.stroke();X.restore();}
+}
+function vessels(){
+  tube(X,[[300,470],[320,600],[333,ligY(333)],[336,900],[326,1100],[300,1500]],20,PAL.nerve,50);
+  [[[335,880],[300,950],[250,1010]],[[333,950],[360,1020],[392,1090]],[[328,1040],[290,1110],[262,1190]]].forEach((b,i)=>tube(X,b,8,PAL.nerve,51+i));
+  tube(X,[[532,460],[482,620],[456,ligY(456)],[449,950],[441,1200],[430,1500]],34,PAL.art,55);
+  tube(X,[[450,1010],[400,1080],[372,1180]],14,PAL.art,56); // profunda femoris
+  tube(X,[[566,1122],[624,1150],[702,1232],[742,1340],[764,1500]],22,PAL.vein,57); // great saphenous
+  tube(X,[[644,460],[602,640],[576,ligY(576)],[569,950],[566,1200],[560,1500]],42,PAL.vein,58);
+}
+function sheath(a){
+  const p=dense([[405,ligY(405)+4],[560,ligY(560)+4],[724,ligY(724)+4],[722,940],[642,1032],[520,1034],[420,1032],[410,900],[405,ligY(405)+4]]);
+  X.save();X.globalAlpha=a;poly(X,J(p,60),true);
+  X.fillStyle=RL?'rgba(210,220,255,.07)':'rgba(170,190,225,.18)';X.fill();
+  X.strokeStyle=RL?'rgba(220,230,255,.5)':INK;X.lineWidth=RL?2.5:2.5;X.setLineDash([10,8]);X.stroke();X.setLineDash([]);
+  X.strokeStyle=RL?'rgba(220,230,255,.32)':'rgba(43,29,27,.6)';X.lineWidth=2;
+  [[512,1028],[624,1004]].forEach(([x,y2],i)=>{poly(X,J(lpts([x,ligY(x)+6],[x-4,y2]),61+i));X.stroke();});
+  X.restore();
+}
+function cloquet(h){
+  const a=1-clamp(h.p*3);if(a<=0)return;
+  X.save();X.globalAlpha=a;
+  if(RL){X.beginPath();X.arc(678,900,30,0,7);X.fillStyle='rgba(230,200,120,.25)';X.fill();}
+  const p=[];for(let i=0;i<24;i++){const th=i/24*6.283;p.push([678+15*Math.cos(th),900+22*Math.sin(th)]);}
+  blob(X,p,RL?{d:'#4a6a3a',b:'#86a868',l:'#c4dca0'}:{sh:'#8fb478',b:'#b8d8a0'},70,{cel:4,lw:2.5});
+  X.restore();
+}
+function fascia(h){
+  // fascia lata (cribriform) with the saphenous opening — the hernia leaves the canal through it
+  X.save();
+  X.beginPath();X.moveTo(480,1000);X.bezierCurveTo(600,990,800,985,1060,975);X.lineTo(1060,1500);X.lineTo(470,1500);X.closePath();
+  X.ellipse(SAPH[0],SAPH[1],60,92,-.12,0,7,true);
+  X.fillStyle=RL?'rgba(235,228,215,.16)':'rgba(255,255,255,.35)';X.fill('evenodd');
+  X.clip('evenodd');X.strokeStyle=RL?'rgba(255,250,235,.10)':'rgba(43,29,27,.13)';X.lineWidth=1.5;
+  for(let i=0;i<60;i++){X.beginPath();X.moveTo(440,1000+i*9);X.lineTo(1080,990+i*9-40);X.stroke();}
+  X.restore();
+  // falciform margin
+  const m=[];for(let i=0;i<=30;i++){const th=lerp(-2.2,1.5,i/30);m.push([SAPH[0]+60*Math.cos(th),SAPH[1]+92*Math.sin(th)]);}
+  X.save();X.lineCap='round';
+  if(RL){poly(X,m);X.strokeStyle='rgba(250,240,220,.7)';X.lineWidth=5;X.stroke();}
+  else{poly(X,J(m,80));X.strokeStyle=INK;X.lineWidth=4;X.stroke();}
+  X.restore();
+}
+function ligaments(hot){
+  // lacunar ligament (medial border of the ring)
+  const lac=dense([[712,ligY(712)+8],[800,ligY(800)+6],[PT[0],PT[1]],[892,893],[800,894],[716,874],[708,850],[712,ligY(712)+8]]);
+  const lc=RL?{d:mix('#9a8c72','#8a1a1a',hot),b:mix('#ddd4c0','#e04848',hot*.7),l:mix('#fffaf0','#ff9a9a',hot*.6)}:{sh:mix('#e1d5bb','#e06060',hot*.7),b:mix('#fffaf0','#ffb0a8',hot*.7)};
+  blob(X,lac,lc,90,{cel:5,lw:3});
+  X.save();poly(X,lac,true);X.clip();X.strokeStyle=RL?'rgba(120,100,80,.35)':'rgba(43,29,27,.35)';X.lineWidth=1.6;
+  for(let i=0;i<14;i++){X.beginPath();X.moveTo(716+i*14,ligY(716+i*14)+4);X.lineTo(714+i*13,895);X.stroke();}X.restore();
+  // inguinal ligament
+  const l=J(LIG,91,1.2);
+  X.save();X.lineCap='round';X.lineJoin='round';
+  if(RL){X.save();X.shadowColor='rgba(0,0,0,.6)';X.shadowBlur=18;X.shadowOffsetY=10;poly(X,l);X.strokeStyle=mix('#857760','#7a1a1a',hot);X.lineWidth=28;X.stroke();X.restore();
+    poly(X,l);X.strokeStyle=mix('#d8cfba','#e04848',hot*.6);X.lineWidth=22;X.stroke();
+    X.save();X.translate(0,-5);poly(X,l);X.strokeStyle=mix('#fbf6ea','#ffb0b0',hot*.6);X.lineWidth=9;X.stroke();X.restore();
+    X.save();X.translate(0,-8);poly(X,l);X.strokeStyle='rgba(255,255,255,.5)';X.lineWidth=2;X.stroke();X.restore();
+  }else{poly(X,l);X.strokeStyle=INK;X.lineWidth=28;X.stroke();poly(X,l);X.strokeStyle=mix('#e3d8c0','#e06060',hot*.7);X.lineWidth=21;X.stroke();
+    X.save();X.translate(-2,-4);poly(X,l);X.strokeStyle=mix('#fffaf0','#ffc0b8',hot*.7);X.lineWidth=12;X.stroke();X.restore();
+    X.save();X.translate(0,-1);X.strokeStyle='rgba(43,29,27,.35)';X.lineWidth=1.4;X.setLineDash([16,10]);poly(X,l);X.stroke();X.restore();}
+  X.restore();
+  // bony landmarks
+  [[ASIS,22,92],[PT,17,93]].forEach(([p,r,id])=>{const c=[];for(let i=0;i<20;i++){const th=i/20*6.283;c.push([p[0]+r*Math.cos(th),p[1]+r*Math.sin(th)]);}blob(X,c,PAL.bone,id,{cel:4,lw:3,shadow:true});});
+}
+function pressure(t){
+  const a=fade(t,6,10.6,.6);if(a<=0)return;
+  for(let i=0;i<3;i++){const ph=(t*.9+i/3)%1;const y=lerp(470,700,ph);
+    arrowW(RING[0]+(i-1)*95,y,RING[0]+(i-1)*95*.55,y+60,a*Math.sin(ph*Math.PI),RL?'#ffd36b':'#d0541a');}
+}
+function arrowW(x1,y1,x2,y2,a,col,w=6){
+  if(a<=0)return;X.save();X.globalAlpha=a;X.strokeStyle=col;X.fillStyle=col;X.lineWidth=w;X.lineCap='round';
+  if(!RL){X.shadowColor='transparent';}
+  X.beginPath();X.moveTo(x1,y1);X.lineTo(x2,y2);X.stroke();
+  const an=Math.atan2(y2-y1,x2-x1),L=w*3.2;X.beginPath();X.moveTo(x2+Math.cos(an)*L*.6,y2+Math.sin(an)*L*.6);
+  X.lineTo(x2-Math.cos(an-.5)*L,y2-Math.sin(an-.5)*L);X.lineTo(x2-Math.cos(an+.5)*L,y2-Math.sin(an+.5)*L);X.closePath();X.fill();X.restore();
+}
+function constriction(t,h){
+  const c=seg(t,14.8,15.4)*(1-seg(t,22.2,22.8));if(c<=0)return;
+  const pul=.5+.5*Math.sin(t*7);
+  X.save();X.globalAlpha=c;X.beginPath();X.ellipse(RING[0],RING[1]+2,h.neck+12,12,0,0,7);
+  X.strokeStyle=RL?`rgba(255,${70+pul*70},${70+pul*50},1)`:'#c8202c';X.lineWidth=(RL?6:5)+pul*3;X.stroke();X.restore();
+  const ca=c*seg(t,15.2,16.4),R0=RING[0],Y=RING[1]+2,col=RL?'#ff5a5a':'#c8202c';
+  arrowW(R0,Y-95,R0,Y-30,ca,col,5);
+  arrowW(R0+110,Y+28,R0+44,Y+8,ca,col,5);
+  arrowW(R0-110,Y-14,R0-46,Y-2,ca*seg(t,15.7,16.7),col,5);
+  arrowW(R0-70,Y+70,R0-26,Y+18,ca*seg(t,16.1,17),col,5);
+}
+
+// ---------- labels ----------
+function label(ax,ay,tx,ty,a,o={}){
+  if(a<=0)return;const [sx,sy]=o.screen?[ax,ay]:S(ax,ay);
+  X.save();X.globalAlpha=a;
+  const lc=o.line||(RL?'rgba(255,255,255,.8)':INK);
+  X.strokeStyle=lc;X.lineWidth=RL?2.2:2;X.beginPath();X.moveTo(sx,sy);
+  const ex=tx+(o.align==='right'?6:o.align==='center'?0:-6);
+  X.quadraticCurveTo(lerp(sx,ex,.5),lerp(sy,ty,.1),ex,ty);X.stroke();
+  X.fillStyle=lc;X.beginPath();X.arc(sx,sy,RL?4.5:4,0,7);X.fill();
+  if(!RL){X.beginPath();X.arc(sx,sy,6,0,7);X.strokeStyle=INK;X.lineWidth=1.5;X.stroke();}
+  const sz=o.s||28;
+  X.font=RL?`${o.w||600} ${sz}px ${SANS}`:`italic ${o.w||700} ${sz+3}px ${SERIF}`;
+  X.textAlign=o.align||'left';X.textBaseline='middle';
+  const dx=X.textAlign==='right'?-8:X.textAlign==='left'?8:0,dy=o.dy||0;
+  X.lineJoin='round';X.lineWidth=RL?7:8;X.strokeStyle=RL?'rgba(8,6,12,.85)':'rgba(244,231,212,.95)';
+  X.strokeText(o.txt,tx+dx,ty+dy);X.fillStyle=o.color||(RL?'#fff':INK);X.fillText(o.txt,tx+dx,ty+dy);
+  X.restore();
+}
+const GOLD=()=>RL?'#ffd36b':'#b0400a';
+const RED=()=>RL?'#ff9a9a':'#b01c2a';
+
+function labels(t,h){
+  const a=seg(t,.9,1.7)*(1-seg(t,5,5.6)), a2=seg(t,1.6,2.4)*(1-seg(t,5,5.6));
+  label(ASIS[0],ASIS[1],110,555,a,{txt:'EIAS',align:'center',s:24,dy:-16});
+  label(250,ligY(250),70,790,a,{txt:'Ligamento inguinal',s:26});
+  label(PT[0],PT[1],1010,1020,a,{txt:'Tubérculo púbico',align:'right',s:25});
+  label(830,872,1010,770,a2,{txt:'Lig. lacunar',align:'right',s:25});
+  label(330,1100,300,1180,a2,{txt:'Nervo femoral',align:'right',s:25});
+  label(446,1250,300,1265,a2,{txt:'Artéria femoral',align:'right',s:25});
+  label(565,1330,300,1350,a2,{txt:'Veia femoral',align:'right',s:25});
+  label(678,905,790,1075,a2*seg(t,2,2.6),{txt:'Canal femoral',s:30,w:800,color:GOLD(),line:GOLD()});
+  label(680,1180,800,1200,a2,{txt:'Hiato safeno',s:24});
+  label(735,1330,800,1320,a2,{txt:'V. safena magna',s:24});
+  // ring highlight before the slide
+  const ra=seg(t,3.1,3.7)*(1-seg(t,7.2,7.8));
+  if(ra>0){X.save();camT(X);X.globalAlpha=ra;X.beginPath();X.ellipse(RING[0],RING[1]+2,42,14,0,0,7);
+    X.strokeStyle=GOLD();X.lineWidth=5;X.setLineDash([9,7]);X.lineDashOffset=-t*40;X.stroke();X.restore();X.setTransform(1,0,0,1,0,0);
+    label(RING[0]+30,RING[1]+8,800,700,ra,{txt:'Anel femoral',s:30,w:800,color:GOLD(),line:GOLD()});}
+  // pressure text
+  const pa=fade(t,6.2,10.4,.6);
+  if(pa>0){X.save();X.globalAlpha=pa;X.font=RL?`800 28px ${SANS}`:`italic 700 31px ${SERIF}`;X.fillStyle=RL?'#ffd36b':'#b0400a';X.textAlign='center';
+    X.lineWidth=7;X.strokeStyle=RL?'rgba(8,6,12,.8)':'rgba(244,231,212,.95)';X.lineJoin='round';
+    X.strokeText('↓ pressão intra-abdominal',600,500);X.fillText('↓ pressão intra-abdominal',600,500);X.restore();}
+  // hernia labels
+  const sacA=fade(t,7.6,14.6,.5);
+  label(h.cx-h.r*.75-10,h.cy+h.r*.45,250,1080,fade(t,7.6,11.2,.5),{txt:'Saco herniário',align:'right',s:28,w:800,color:GOLD(),line:GOLD()});
+  label(h.cx+h.r*.8,h.cy-h.r*.55,1010,1140,fade(t,11,14.6,.5),{txt:'Saco herniário',align:'right',s:28,w:800,color:GOLD(),line:GOLD(),dy:-22});
+  label(678,880,250,880,fade(t,6.6,10.6,.5),{txt:'Canal femoral',align:'right',s:25,w:700});
+  const bl=bowelPath(h).loop;const q=bl[Math.floor(bl.length*.72)];
+  label(q[0],q[1],1010,1240,fade(t,11.8,14.6,.5),{txt:'Alça de intestino delgado',align:'right',s:25,dy:-22});
+  const m=[lerp(h.cx,q[0],.3),lerp(h.cy,q[1],.3)];
+  label(m[0],m[1],1010,1330,fade(t,12.4,14.6,.5),{txt:'Mesentério',align:'right',s:25,dy:-22});
+  // borders of the ring (incarceration)
+  const la=seg(t,15.6,16.4)*(1-seg(t,19.2,19.8));
+  const [rx,ry]=S(RING[0],RING[1]);
+  label(rx,ry-80,rx+30,ry-150,la,{screen:true,txt:'Lig. inguinal · anterior',s:24,color:RED(),line:RED()});
+  label(rx+120,ry+30,rx+170,ry+80,la,{screen:true,txt:'Lig. lacunar · medial',s:24,color:RED(),line:RED()});
+  label(rx-120,ry-14,rx-150,ry-80,la*seg(t,16,16.8),{screen:true,txt:'Veia femoral · lateral',align:'right',s:24,color:RED(),line:RED()});
+  label(rx-80,ry+80,rx-150,ry+175,la*seg(t,16.4,17.2),{screen:true,txt:'Lig. pectíneo · posterior',align:'right',s:24,color:RED(),line:RED()});
+  label(q[0],q[1],1010,1250,fade(t,17,19.4,.5),{txt:'Edema + congestão venosa',align:'right',s:25,dy:-22,color:RED(),line:RED()});
+  label(q[0],q[1],1010,1250,fade(t,19.6,22.6,.5),{txt:'Isquemia → necrose',align:'right',s:27,w:800,dy:-22,color:RL?'#d9b0ff':'#5a1a6a',line:RL?'#d9b0ff':'#5a1a6a'});
+  label(h.cx,h.cy+h.r+20,1010,1380,fade(t,17.6,22.6,.5),{txt:'Líquido no saco',align:'right',s:23,dy:-20});
+}
+
+// ---------- sagittal inset ----------
+function inset(t){
+  const a=fade(t,10.4,14.8,.5);if(a<=0)return;
+  const k=ease(seg(t,10.6,14.2)),cx=200,cy=1290,R=128;
+  X.save();X.globalAlpha=a;
+  X.beginPath();X.arc(cx,cy,R+5,0,7);X.fillStyle=RL?'#0c0f1c':'#fbf3e4';X.fill();X.strokeStyle=RL?'rgba(255,255,255,.7)':INK;X.lineWidth=3;X.stroke();
+  X.beginPath();X.arc(cx,cy,R,0,7);X.clip();
+  // anterior is to the right
+  X.fillStyle=RL?'#3a1a20':'#f0c4bc';X.fillRect(cx-R,cy-R,2*R,R*.95); // abdomen
+  X.fillStyle=RL?'#5a2226':'#e0998a';X.fillRect(cx-R,cy-R*.05,2*R,R*1.1); // thigh
+  X.fillStyle=RL?'#c99b7e':'#f2c8aa';X.beginPath();X.moveTo(cx+70,cy-R);X.quadraticCurveTo(cx+56,cy-10,cx+96,cy+R);X.lineTo(cx+R,cy+R);X.lineTo(cx+R,cy-R);X.fill(); // skin/subcut
+  X.fillStyle=RL?'#e8dcc0':'#f7ecd2';X.beginPath();X.ellipse(cx-40,cy+28,38,24,.3,0,7);X.fill();if(!RL){X.strokeStyle=INK;X.lineWidth=2;X.stroke();}
+  X.fillStyle=RL?'#f2ead6':'#fffaf0';X.beginPath();X.arc(cx+36,cy-34,13,0,7);X.fill();if(!RL){X.strokeStyle=INK;X.lineWidth=2;X.stroke();}
+  // J path
+  const pts=[];for(let i=0;i<=80;i++){const u=i/80;let x,y;
+    if(u<.45){const v=u/.45;x=cx+6;y=cy-110+v*130;}
+    else if(u<.72){const v=(u-.45)/.27;const ang=Math.PI*(1-v);x=cx+6+30*(1-Math.cos(Math.PI*v));y=cy+20+Math.sin(Math.PI*v)*28;}
+    else{const v=(u-.72)/.28;x=cx+66+v*4;y=cy+20-v*70;}
+    pts.push([x,y]);}
+  X.setLineDash([7,7]);X.strokeStyle=RL?'rgba(255,255,255,.35)':'rgba(43,29,27,.4)';X.lineWidth=3;poly(X,pts);X.stroke();X.setLineDash([]);
+  const n=Math.max(2,Math.floor(pts.length*k));
+  X.lineCap='round';X.strokeStyle=RL?'#ffd36b':'#b0400a';X.lineWidth=7;poly(X,pts.slice(0,n));X.stroke();
+  const p=pts[n-1];X.fillStyle=RL?'#cf7c73':'#f8b8ac';X.beginPath();X.arc(p[0],p[1],9+k*9,0,7);X.fill();X.strokeStyle=RL?'#fff':INK;X.lineWidth=2.5;X.stroke();
+  X.restore();
+  X.save();X.globalAlpha=a;X.textAlign='center';
+  X.font=RL?`800 23px ${SANS}`:`italic 700 26px ${SERIF}`;X.fillStyle=RL?'#fff':INK;X.fillText('Corte sagital',cx,cy-R-40);
+  X.font=RL?`600 21px ${SANS}`:`italic 26px ${SERIF}`;X.fillStyle=GOLD();X.fillText('trajeto em "J"',cx,cy-R-14);
+  X.font=RL?`600 17px ${SANS}`:`italic 19px ${SERIF}`;X.fillStyle=RL?'rgba(255,255,255,.8)':INK;X.fillText('posterior',cx-80,cy+R-22);X.fillText('anterior',cx+82,cy+R-22);
+  X.restore();
+}
+
+// ---------- final: surface view with the visible bulge ----------
+function skin(t,h){
+  const a=smooth(seg(t,22.4,24.2));if(a<=0)return;
+  const bx=h.cx+4,by=h.cy+22,R=h.r+34;
+  X.save();X.globalAlpha=a;
+  if(RL){const g=X.createLinearGradient(0,450,0,1450);g.addColorStop(0,'#d2a084');g.addColorStop(1,'#b8805e');X.fillStyle=g;X.fillRect(-500,0,2200,2400);
+    const g2=X.createRadialGradient(540,900,200,540,950,800);g2.addColorStop(0,'rgba(0,0,0,0)');g2.addColorStop(1,'rgba(40,15,8,.45)');X.fillStyle=g2;X.fillRect(-500,0,2200,2400);
+    // inguinal crease
+    X.filter='blur(7px)';X.strokeStyle='rgba(90,40,25,.55)';X.lineWidth=16;X.lineCap='round';poly(X,LIG.map(p=>[p[0],p[1]+38]));X.stroke();
+    X.strokeStyle='rgba(255,220,200,.25)';X.lineWidth=10;poly(X,LIG.map(p=>[p[0],p[1]+56]));X.stroke();
+    // bulge
+    X.fillStyle='rgba(60,22,10,.55)';X.filter='blur(26px)';X.beginPath();X.ellipse(bx+30,by+55,R,R*.78,-.2,0,7);X.fill();X.filter='none';
+    const bg=X.createRadialGradient(bx-R*.38,by-R*.42,R*.05,bx,by,R*1.08);bg.addColorStop(0,'#f2c8ac');bg.addColorStop(.5,'#d49674');bg.addColorStop(.9,'rgba(185,125,92,.6)');bg.addColorStop(1,'rgba(185,125,92,0)');
+    X.fillStyle=bg;X.beginPath();X.ellipse(bx,by,R*1.08,R*.9,-.2,0,7);X.fill();
+    const er=seg(t,24.6,26.4);X.filter='blur(22px)';X.fillStyle=`rgba(190,40,40,${er*.28})`;X.beginPath();X.ellipse(bx+10,by+10,R*.7,R*.55,-.2,0,7);X.fill();
+    X.filter='blur(10px)';X.fillStyle='rgba(255,245,235,.5)';X.beginPath();X.ellipse(bx-R*.38,by-R*.4,R*.26,R*.13,-.6,0,7);X.fill();X.filter='none';
+    X.globalCompositeOperation='overlay';X.globalAlpha=a*.15;X.drawImage(GRAIN[1],-60,0,1200,2130);X.globalCompositeOperation='source-over';
+  }else{
+    X.fillStyle='#f2c7a8';X.fillRect(-500,0,2200,2400);
+    X.strokeStyle='rgba(43,29,27,.15)';X.lineWidth=2;for(let i=0;i<70;i++){X.beginPath();X.moveTo(1000-i*30,400);X.lineTo(1300-i*30,1600);X.stroke();} // light hatch
+    X.strokeStyle=INK;X.lineWidth=4;X.lineCap='round';poly(X,J(LIG.slice(4,56).map(p=>[p[0],p[1]+40]),701));X.stroke();
+    const bp=[];for(let i=0;i<48;i++){const th=i/48*6.283;bp.push([bx+R*1.05*Math.cos(th)*Math.cos(-.2)-R*.88*Math.sin(th)*Math.sin(-.2),by+R*1.05*Math.cos(th)*Math.sin(-.2)+R*.88*Math.sin(th)*Math.cos(-.2)]);}
+    X.save();poly(X,J(bp,702),true);X.fillStyle='#e39f84';X.fill();X.clip();X.translate(-R*.16,-R*.18);poly(X,bp,true);X.fillStyle='#f7cfb4';X.fill();X.restore();
+    const er=seg(t,24.6,26.4);X.save();poly(X,bp,true);X.clip();X.strokeStyle=`rgba(200,50,50,${er*.5})`;X.lineWidth=2;for(let i=0;i<40;i++){X.beginPath();X.moveTo(bx-R+i*14,by+R);X.lineTo(bx-R+i*14+R*.6,by);X.stroke();}X.restore();
+    // ink contour only on the shadow side (classic illustration)
+    X.strokeStyle=INK;X.lineWidth=4.5;poly(X,J(bp.slice(2,30),703));X.stroke();
+    X.fillStyle='rgba(255,255,255,.85)';X.beginPath();X.ellipse(bx-R*.4,by-R*.42,R*.18,R*.08,-.6,0,7);X.fill();
+  }
+  X.restore();
+  // x-ray ghost of the sac under the skin
+  const gh=fade(t,24.4,27.2,.6)*.5;
+  if(gh>0){X.save();X.globalAlpha=gh;X.setLineDash([12,9]);X.lineDashOffset=-t*25;X.strokeStyle=RL?'rgba(255,255,255,.85)':INK;X.lineWidth=3;poly(X,sacOutline(h),true);X.stroke();X.restore();}
+  // landmarks
+  const la=seg(t,23.6,24.4);
+  X.save();X.globalAlpha=la;X.setLineDash([14,10]);X.strokeStyle=RL?'rgba(255,255,255,.9)':INK;X.lineWidth=3.5;poly(X,LIG);X.stroke();X.setLineDash([]);
+  [ASIS,PT].forEach(p=>{X.beginPath();X.arc(p[0],p[1],10,0,7);X.fillStyle=RL?'#fff':INK;X.fill();});X.restore();
+}
+function skinLabels(t,h){
+  const la=seg(t,23.6,24.4),lb=seg(t,24.4,25.2);if(la<=0)return;
+  label(ASIS[0],ASIS[1],110,555,la,{txt:'EIAS',align:'center',s:25,dy:-16});
+  label(330,ligY(330),70,560,la,{txt:'Ligamento inguinal',s:26,dy:40});
+  label(PT[0],PT[1],1010,780,la,{txt:'Tubérculo púbico',align:'right',s:26});
+  label(h.cx+h.r*.95,h.cy+h.r*.7,1010,1330,lb,{txt:'Abaulamento',align:'right',s:36,w:800,color:GOLD(),line:GOLD(),dy:-26});
+  label(h.cx-h.r*.4,h.cy+h.r*.9,90,1360,fade(t,24.8,27.4,.5),{txt:'saco herniário (sob a pele)',s:23});
+}
+
+// ---------- captions / title / finishing ----------
+const CAPS=[
+  [0.5,5.6,'ANATOMIA','O **canal femoral** é o compartimento mais medial da bainha femoral: **medial à veia**, abaixo do ligamento inguinal.'],
+  [5.6,10.2,'1 · DESLIZAMENTO','Com a **pressão intra-abdominal**, o saco peritoneal com uma alça de delgado entra pelo **anel femoral** e desliza pelo canal.'],
+  [10.2,14.6,'2 · EXTERIORIZAÇÃO','Sai pelo **hiato safeno** e, no tecido frouxo da coxa, dobra **para frente e para cima** — trajeto em "J".'],
+  [14.6,19.2,'3 · ENCARCERAMENTO','O anel é **estreito e inextensível**: a alça não volta. O retorno venoso trava → **edema e congestão**.'],
+  [19.2,22.6,'4 · ESTRANGULAMENTO','O edema bloqueia a irrigação arterial → **isquemia e necrose**. Cuidado com a hérnia de **Richter**.'],
+  [22.6,28,'5 · NA PELE','**Abaulamento abaixo do ligamento inguinal**, inferolateral ao tubérculo púbico. Tenso, doloroso, irredutível = **cirurgia de urgência**.'],
+];
+function wrap(ctx,txt,maxW){const ws=txt.split(' '),L=[];let c='';for(const w of ws){const s=c?c+' '+w:w;if(ctx.measureText(s).width>maxW&&c){L.push(c);c=w;}else c=s;}if(c)L.push(c);return L;}
+function richText(txt,x,y,maxW,size,lh){
+  const fn=b=>RL?`${b?800:500} ${size}px ${SANS}`:`${b?'bold':'normal'} ${size+2}px ${SERIF}`;
+  X.font=fn(false);const plain=txt.replace(/\*\*/g,''),lines=wrap(X,plain,maxW);
+  const bold=[];let idx=0,on=false;for(let i=0;i<txt.length;i++){if(txt.startsWith('**',i)){on=!on;i++;continue;}bold[idx++]=on;}
+  let k=0;lines.forEach((ln,li)=>{let cx=x;for(const ch of ln){const b=bold[k];X.font=fn(b);X.fillStyle=b?(RL?'#ffd36b':'#9a3008'):(RL?'#eef1fa':INK);X.fillText(ch,cx,y+li*lh);cx+=X.measureText(ch).width;k++;}k++;});
+}
+function captions(t){
+  for(const [a,b,tag,txt] of CAPS){const al=fade(t,a,b,.4);if(al<=0)continue;
+    X.save();X.globalAlpha=al;const yo=(1-ease(seg(t,a,a+.6)))*24;
+    roundRect(X,56,1484+yo,968,232,RL?30:18);
+    if(RL){X.fillStyle='rgba(255,255,255,.06)';X.fill();X.strokeStyle='rgba(255,255,255,.12)';X.lineWidth=2;X.stroke();}
+    else{X.fillStyle='#fbf4e6';X.fill();X.strokeStyle=INK;X.lineWidth=3;X.stroke();}
+    X.font=RL?`800 24px ${SANS}`:`bold 26px ${SERIF}`;X.textBaseline='alphabetic';
+    const tw=X.measureText(tag).width+34;roundRect(X,88,1508+yo,tw,42,RL?21:6);
+    X.fillStyle=tag.includes('ESTRANG')?'#6a1838':tag.includes('ENCARC')?'#a82a34':tag.includes('PELE')?'#8a5426':(RL?'#2a3f78':'#2b1d1b');X.fill();
+    X.fillStyle='#fff';X.fillText(tag,105,1537+yo);
+    richText(txt,90,1598+yo,RL?895:860,RL?33:34,45);
+    X.restore();}
+}
+function title(t){
+  X.save();X.globalAlpha=ease(seg(t,0,.9));X.textAlign='center';
+  if(RL){X.fillStyle='#fff';X.font=`800 78px ${SANS}`;X.letterSpacing='4px';X.fillText('HÉRNIA FEMORAL',W/2,330);X.letterSpacing='0px';
+    X.font=`500 34px ${SANS}`;X.fillStyle='rgba(255,255,255,.72)';X.fillText('do deslizamento ao encarceramento',W/2,384);
+    X.font=`600 21px ${SANS}`;X.fillStyle='rgba(255,255,255,.42)';X.fillText('VISTA ANTERIOR  ·  REGIÃO INGUINOFEMORAL DIREITA',W/2,424);}
+  else{X.fillStyle=INK;X.font=`bold 86px ${SERIF}`;X.fillText('Hérnia femoral',W/2,330);
+    X.font=`italic 38px ${SERIF}`;X.fillStyle='#7a3a20';X.fillText('do deslizamento ao encarceramento',W/2,384);
+    X.font=`italic 24px ${SERIF}`;X.fillStyle='rgba(43,29,27,.6)';X.fillText('vista anterior · região inguinofemoral direita',W/2,424);
+    X.strokeStyle=INK;X.lineWidth=2;X.beginPath();X.moveTo(340,348);X.lineTo(740,348);X.stroke();}
+  X.restore();
+  X.fillStyle=RL?'rgba(255,255,255,.12)':'rgba(43,29,27,.15)';roundRect(X,120,1758,840,6,3);X.fill();
+  X.fillStyle=RL?'rgba(255,255,255,.75)':INK;roundRect(X,120,1758,Math.max(6,840*clamp(t/DUR)),6,3);X.fill();
+}
+function orientation(a){
+  if(a<=0)return;X.save();X.globalAlpha=a*.75;X.font=RL?`700 20px ${SANS}`:`italic 22px ${SERIF}`;X.fillStyle=RL?'#fff':INK;
+  X.fillText('LATERAL',72,494);X.textAlign='right';X.fillText('MEDIAL',1008,494);X.restore();
+}
+
+function draw(t){
+  BS=Math.floor(t*8);
+  camera(t);
+  const h=hernia(t);
+  X.setTransform(1,0,0,1,0,0);
+  // page background
+  if(RL){const g=X.createLinearGradient(0,0,0,H);g.addColorStop(0,'#0d0f18');g.addColorStop(1,'#07080d');X.fillStyle=g;X.fillRect(0,0,W,H);}
+  else{X.drawImage(PAPER,0,0,W,H);}
+  // diagram panel
+  X.save();roundRect(X,40,450,1000,1000,RL?36:14);X.clip();
+  camT(X);
+  const ia=ease(seg(t,.1,1.1));X.globalAlpha=ia;
+  panelBase();abdomen();muscles();bone();vessels();
+  sheath(1-seg(t,10,11)*.55);cloquet(h);
+  drawHernia(O,h,t);
+  X.setTransform(1,0,0,1,0,0);X.globalAlpha=ia;X.drawImage(off,0,0);camT(X);
+  fascia(h);
+  const hot=seg(t,14.8,16)*(.55+.45*Math.sin(t*7))*(1-seg(t,22,22.6));
+  ligaments(hot);
+  if(h.b>0){X.save();X.beginPath();X.ellipse(h.cx,h.cy,(h.r+20)*1.05,(h.r+20)*.95,0,0,7);X.clip();X.setTransform(1,0,0,1,0,0);X.globalAlpha=ia*clamp(h.b*4);X.drawImage(off,0,0);X.restore();camT(X);}
+  pressure(t);constriction(t,h);
+  skin(t,h);
+  X.setTransform(1,0,0,1,0,0);
+  if(RL){const v=X.createRadialGradient(540,950,300,540,950,760);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,.55)');X.fillStyle=v;X.fillRect(0,0,W,H);}
+  X.restore();
+  if(!RL){X.save();roundRect(X,40,450,1000,1000,14);X.strokeStyle=INK;X.lineWidth=4;X.stroke();X.restore();}
+  else{X.save();roundRect(X,40,450,1000,1000,36);X.strokeStyle='rgba(255,255,255,.08)';X.lineWidth=2;X.stroke();X.restore();}
+  X.save();roundRect(X,40,450,1000,1000,RL?36:14);X.clip();
+  orientation(seg(t,.9,1.7)*(1-seg(t,5,5.6)));
+  labels(t,h);inset(t);skinLabels(t,h);
+  X.restore();
+  title(t);captions(t);
+  X.save();X.globalAlpha=.5;X.font=RL?`500 19px ${SANS}`:`italic 21px ${SERIF}`;X.fillStyle=RL?'#fff':INK;X.textAlign='center';X.fillText('ilustração esquemática · conteúdo educativo',W/2,1812);X.restore();
+  if(RL){X.save();X.globalCompositeOperation='overlay';X.globalAlpha=.07;X.drawImage(GRAIN[Math.floor(t*24)%4],0,0,W,H);X.restore();}
+}
+window.draw=draw;window.DUR=DUR;
+if(!Q.has('render')){const s0=performance.now();const loop=()=>{draw(((performance.now()-s0)/1000)%DUR);requestAnimationFrame(loop);};loop();}
+</script></body></html>
